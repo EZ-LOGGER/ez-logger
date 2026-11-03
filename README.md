@@ -10,8 +10,7 @@ A keyboard-driven macOS menubar app for logging and renaming sports video files.
 
 1. Download `EZLogger-X.X.X.dmg` from the [latest release](https://github.com/EZ-LOGGER/ez-logger/releases/latest)
 2. Open the DMG and drag **EZ Logger** into your `/Applications` folder
-3. Launch from Spotlight (`Cmd+Space` → EZ Logger)
-4. The 🏀 icon appears in your menubar
+3. Launch from Spotlight (`Cmd+Space` → EZ Logger) or double-click in Applications
 
 > **First launch:** macOS may show "unidentified developer" — right-click the app → Open → Open to bypass. This is a one-time step.
 
