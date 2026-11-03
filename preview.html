@@ -1,0 +1,1165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>EZ Logger — Live Preview</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #111113;
+    color: #e5e5e7;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    font-size: 13px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Live reload badge ─────────────────────────────────────────────────── */
+  #reload-badge {
+    position: fixed;
+    top: 10px; right: 10px;
+    background: #1a7f3c;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 12px;
+    border-radius: 20px;
+    opacity: 0;
+    transition: opacity 0.25s;
+    z-index: 999;
+    pointer-events: none;
+  }
+  #reload-badge.show { opacity: 1; }
+
+  /* ── App chrome (fake title bar) ───────────────────────────────────────── */
+  #titlebar {
+    height: 28px;
+    background: #1a1a1c;
+    display: flex;
+    align-items: center;
+    padding: 0 14px;
+    gap: 7px;
+    flex-shrink: 0;
+    border-bottom: 0.5px solid rgba(255,255,255,0.06);
+  }
+  .traffic-light {
+    width: 12px; height: 12px;
+    border-radius: 50%;
+  }
+  .tl-red    { background: #ff5f57; }
+  .tl-yellow { background: #febc2e; }
+  .tl-green  { background: #28c840; }
+  #titlebar-label {
+    flex: 1;
+    text-align: center;
+    font-size: 12px;
+    color: rgba(255,255,255,0.45);
+    letter-spacing: 0.01em;
+  }
+
+  /* ── App layout ────────────────────────────────────────────────────────── */
+  #app {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+  }
+
+  /* ── Sidebar ────────────────────────────────────────────────────────────── */
+  #sidebar {
+    width: 200px;
+    flex-shrink: 0;
+    background: rgba(40,40,44,0.95);
+    border-right: 0.5px solid rgba(255,255,255,0.07);
+    display: flex;
+    flex-direction: column;
+    padding-top: 16px;
+    gap: 2px;
+    overflow-y: auto;
+  }
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 8px;
+    padding: 9px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    color: rgba(255,255,255,0.5);
+    font-size: 13px;
+    user-select: none;
+    transition: background 0.1s;
+  }
+  .nav-item:hover { background: rgba(255,255,255,0.06); }
+  .nav-item.active {
+    background: rgba(140,34,50,0.30);
+    color: #dbcca6;
+  }
+  .nav-icon { font-size: 14px; width: 20px; text-align: center; }
+  .nav-sep {
+    height: 0.5px;
+    background: rgba(255,255,255,0.10);
+    margin: 6px 20px;
+  }
+
+  /* ── Main content ───────────────────────────────────────────────────────── */
+  #main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Top bar ────────────────────────────────────────────────────────────── */
+  #topbar {
+    height: 52px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    padding: 0 24px;
+    gap: 8px;
+    border-bottom: 0.5px solid rgba(255,255,255,0.08);
+    background: #1a1a1c;
+  }
+  .pill {
+    display: flex;
+    align-items: center;
+    height: 26px;
+    padding: 0 12px;
+    border-radius: 13px;
+    background: rgba(255,255,255,0.06);
+    border: 0.5px solid rgba(255,255,255,0.10);
+    font-size: 12px;
+    color: #e5e5e7;
+    white-space: nowrap;
+    gap: 5px;
+  }
+  .pill.clickable {
+    background: rgba(255,255,255,0.10);
+    border-color: rgba(255,255,255,0.16);
+    cursor: pointer;
+  }
+  .btn-rename {
+    margin-left: auto;
+    padding: 0 16px;
+    height: 30px;
+    border-radius: 8px;
+    background: #8c2232;
+    border: none;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+  }
+  .btn-rename:hover { background: #a62a3c; }
+  .btn-rename:active { background: #6b1a26; }
+
+  /* ── Content area ───────────────────────────────────────────────────────── */
+  #content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 32px;
+    overflow-y: auto;
+    gap: 20px;
+  }
+
+  /* ── Now Tagging card ───────────────────────────────────────────────────── */
+  .now-card {
+    width: 100%;
+    max-width: 700px;
+  }
+  .now-filename {
+    text-align: center;
+    font-family: "SF Mono", "Menlo", monospace;
+    font-size: 13px;
+    color: #e5e5e7;
+    margin-bottom: 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .now-card-inner {
+    background: #252528;
+    border: 0.5px solid rgba(255,255,255,0.08);
+    border-radius: 14px;
+    display: flex;
+    height: 190px;
+  }
+
+  /* Left column */
+  .card-left {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 16px 20px;
+    gap: 14px;
+    border-right: 0.5px solid rgba(255,255,255,0.06);
+  }
+
+  /* Step indicator */
+  .steps-row {
+    display: flex;
+    align-items: center;
+    gap: 0;
+  }
+  .step-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+  }
+  .step-connector {
+    width: 52px;
+    height: 1px;
+    background: rgba(255,255,255,0.15);
+    margin-bottom: 18px;
+  }
+  .step-circle {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: 1.5px solid rgba(255,255,255,0.20);
+    background: rgba(255,255,255,0.04);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 700;
+    color: rgba(255,255,255,0.30);
+    transition: background 0.2s, border-color 0.2s, color 0.2s;
+    cursor: pointer;
+  }
+  .step-circle.active {
+    background: #8c2232;
+    border-color: #8c2232;
+    color: #fff;
+  }
+  .step-circle.done {
+    background: #dbcca6;
+    border-color: #dbcca6;
+    color: #1a1a1c;
+  }
+  .step-label {
+    font-size: 10px;
+    color: rgba(255,255,255,0.30);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    transition: color 0.2s;
+  }
+  .step-label.active { color: #dbcca6; }
+  .step-label.done   { color: #e5e5e7; }
+
+  /* Tag preview */
+  .tag-preview {
+    font-family: "SF Mono", "Menlo", monospace;
+    font-size: 12px;
+    color: #dbcca6;
+    text-align: center;
+    min-height: 18px;
+  }
+  .card-hint {
+    font-size: 11px;
+    color: rgba(255,255,255,0.20);
+    text-align: center;
+  }
+
+  /* Right column — thumbnail */
+  .card-right {
+    width: 260px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+  }
+  .thumb {
+    width: 224px;
+    height: 126px;
+    background: #1a1a1c;
+    border: 0.5px solid rgba(255,255,255,0.10);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+    color: rgba(255,255,255,0.15);
+  }
+
+  /* ── Shortcut cards ─────────────────────────────────────────────────────── */
+  .sc-row {
+    display: grid;
+    grid-template-areas: "stack";
+    width: 100%;
+    max-width: 700px;
+  }
+  .sc-card {
+    grid-area: stack;
+    background: #252528;
+    border: 1.5px solid #8c2232;
+    border-radius: 14px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+  }
+  .sc-card.active-card {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .sc-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: rgba(255,255,255,0.40);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-bottom: 2px;
+  }
+  .sc-pills {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 6px;
+  }
+  .sc-pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    border-radius: 7px;
+    background: rgba(255,255,255,0.05);
+    font-size: 12px;
+    font-family: "SF Mono", "Menlo", monospace;
+  }
+  .sc-pill .key {
+    background: rgba(255,255,255,0.10);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 11px;
+    color: rgba(255,255,255,0.55);
+    min-width: 20px;
+    text-align: center;
+  }
+  .sc-pill .lbl { color: #e5e5e7; }
+
+  /* ── Footer status bar ──────────────────────────────────────────────────── */
+  #statusbar {
+    height: 24px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    gap: 14px;
+    border-top: 0.5px solid rgba(255,255,255,0.06);
+    background: #161618;
+    font-size: 11px;
+    color: rgba(255,255,255,0.30);
+  }
+  #status-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: #1a7f3c;
+    flex-shrink: 0;
+  }
+
+  /* ── Placeholder (non-tag sections) ─────────────────────────────────────── */
+  #placeholder {
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    gap: 10px;
+    color: rgba(255,255,255,0.40);
+  }
+  #placeholder h2 { font-size: 24px; font-weight: 400; color: #e5e5e7; }
+  #placeholder p  { font-size: 13px; }
+
+  /* ── Players / Plays / Ratings sections ─────────────────────────────────── */
+  #players-section, #plays-section, #ratings-section {
+    display: none;
+    flex-direction: column;
+    width: 100%;
+    flex: 1;
+    min-height: 0;
+  }
+  .players-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 8px 16px 8px;
+    border-bottom: 0.5px solid rgba(255,255,255,0.08);
+    flex-shrink: 0;
+  }
+  .players-title {
+    font-size: 22px;
+    font-weight: 700;
+    color: #e5e5e7;
+  }
+  .players-count {
+    font-size: 13px;
+    color: rgba(255,255,255,0.45);
+  }
+  .players-actions {
+    margin-left: auto;
+    display: flex;
+    gap: 10px;
+  }
+  .btn-secondary, .btn-primary {
+    height: 30px;
+    padding: 0 14px;
+    border: none;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    color: #fff;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+  }
+  .btn-secondary { background: #3a3a3c; }
+  .btn-secondary:hover  { background: #4a4a4c; }
+  .btn-secondary:active { background: #2c2c2e; }
+  .btn-primary   { background: #8c2232; }
+  .btn-primary:hover    { background: #a62a3c; }
+  .btn-primary:active   { background: #6b1a26; }
+
+  .players-grid {
+    margin-top: 20px;
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px 16px;
+    overflow-y: auto;
+    padding: 4px 8px 24px 8px;
+    flex: 1;
+    align-content: start;
+  }
+  .player-pill {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 52px;
+    padding: 0 10px 0 12px;
+    border-radius: 10px;
+    background: rgba(255,255,255,0.05);
+    border: 0.5px solid rgba(255,255,255,0.10);
+    transition: background 0.12s;
+  }
+  .player-pill:hover { background: rgba(255,255,255,0.08); }
+  .player-pill .key-badge {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    background: rgba(140,34,50,0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: "SF Mono", "Menlo", monospace;
+    font-size: 14px;
+    font-weight: 600;
+    color: #dbcca6;
+    flex-shrink: 0;
+  }
+  .player-pill .player-name {
+    flex: 1;
+    font-size: 14px;
+    color: #e5e5e7;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .player-pill .icon-btn {
+    width: 26px;
+    height: 26px;
+    border: none;
+    background: transparent;
+    color: rgba(255,255,255,0.50);
+    cursor: pointer;
+    border-radius: 6px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.12s, color 0.12s;
+  }
+  .player-pill .icon-btn:hover {
+    background: rgba(255,255,255,0.10);
+    color: #e5e5e7;
+  }
+  .players-empty {
+    grid-column: 1 / -1;
+    text-align: center;
+    padding: 60px 20px;
+    color: rgba(255,255,255,0.30);
+    font-size: 14px;
+  }
+
+  /* ── Session section ─────────────────────────────────────────────────────── */
+  #session-section {
+    display: none;
+    flex-direction: column;
+    width: 100%;
+    flex: 1;
+    min-height: 0;
+  }
+  .session-form {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    padding: 28px 40px;
+    overflow-y: auto;
+    flex: 1;
+  }
+  .form-row {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    max-width: 560px;
+    height: 54px;
+    background: rgba(255,255,255,0.04);
+    border: 0.5px solid rgba(255,255,255,0.08);
+    border-radius: 10px;
+    padding: 0 14px;
+    gap: 0;
+    flex-shrink: 0;
+  }
+  .form-label {
+    width: 150px;
+    font-size: 13px;
+    color: rgba(255,255,255,0.45);
+    flex-shrink: 0;
+  }
+  .form-field-wrap {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .form-input {
+    flex: 1;
+    height: 34px;
+    background: rgba(255,255,255,0.08);
+    border: 0.5px solid rgba(255,255,255,0.18);
+    border-radius: 8px;
+    padding: 0 10px;
+    font-family: "SF Mono", "Menlo", monospace;
+    font-size: 13px;
+    color: #e5e5e7;
+    outline: none;
+  }
+  .form-input:focus { border-color: rgba(255,255,255,0.35); }
+  .form-dropdown {
+    flex: 1;
+    height: 34px;
+    background: rgba(255,255,255,0.08);
+    border: 0.5px solid rgba(255,255,255,0.18);
+    border-radius: 8px;
+    padding: 0 10px;
+    font-family: "SF Mono", "Menlo", monospace;
+    font-size: 13px;
+    color: #e5e5e7;
+    cursor: pointer;
+    text-align: left;
+  }
+  .form-dropdown:hover { background: rgba(255,255,255,0.12); }
+  .form-path {
+    flex: 1;
+    font-size: 12px;
+    color: rgba(255,255,255,0.45);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* ── Help section ────────────────────────────────────────────────────────── */
+  #help-section {
+    display: none;
+    flex-direction: column;
+    width: 100%;
+    flex: 1;
+    min-height: 0;
+  }
+  .help-body {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+  }
+  .help-toc {
+    width: 200px;
+    flex-shrink: 0;
+    background: rgba(0,0,0,0.15);
+    border-right: 0.5px solid rgba(255,255,255,0.06);
+    padding: 16px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    overflow-y: auto;
+  }
+  .toc-header {
+    font-size: 10px;
+    font-weight: 700;
+    color: rgba(255,255,255,0.25);
+    letter-spacing: 0.08em;
+    padding: 4px 10px 8px;
+  }
+  .toc-item {
+    padding: 7px 10px;
+    border-radius: 8px;
+    font-size: 13px;
+    color: rgba(255,255,255,0.45);
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+  .toc-item:hover { background: rgba(255,255,255,0.06); color: #e5e5e7; }
+  .toc-item.active { background: rgba(140,34,50,0.25); color: #dbcca6; }
+  .help-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 28px 32px 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  .help-entry { margin-bottom: 36px; }
+  .help-entry-title {
+    font-size: 17px;
+    font-weight: 700;
+    color: #e5e5e7;
+    margin-bottom: 10px;
+  }
+  .help-entry-body {
+    font-size: 13px;
+    color: rgba(255,255,255,0.55);
+    line-height: 1.65;
+    white-space: pre-wrap;
+  }
+  .help-divider {
+    border: none;
+    border-top: 0.5px solid rgba(255,255,255,0.08);
+    margin: 0 0 36px 0;
+  }
+</style>
+</head>
+<body>
+
+<!-- Live reload badge -->
+<div id="reload-badge">reloaded</div>
+
+<!-- Fake macOS title bar -->
+<div id="titlebar">
+  <div class="traffic-light tl-red"></div>
+  <div class="traffic-light tl-yellow"></div>
+  <div class="traffic-light tl-green"></div>
+  <span id="titlebar-label">EZ Logger — Live Preview</span>
+</div>
+
+<div id="app">
+
+  <!-- Sidebar -->
+  <nav id="sidebar">
+    <div class="nav-item active" data-section="tag" onclick="selectSection('tag')">
+      <span class="nav-icon">⚡</span> Log Mode
+    </div>
+    <div class="nav-item" data-section="players" onclick="selectSection('players')">
+      <span class="nav-icon">👥</span> Players
+    </div>
+    <div class="nav-item" data-section="plays" onclick="selectSection('plays')">
+      <span class="nav-icon">🎬</span> Plays
+    </div>
+    <div class="nav-item" data-section="ratings" onclick="selectSection('ratings')">
+      <span class="nav-icon">⭐</span> Ratings
+    </div>
+    <div class="nav-sep"></div>
+    <div class="nav-item" data-section="session" onclick="selectSection('session')">
+      <span class="nav-icon">⚙️</span> Session
+    </div>
+    <div class="nav-item" data-section="help" onclick="selectSection('help')">
+      <span class="nav-icon">❓</span> Help
+    </div>
+  </nav>
+
+  <!-- Main -->
+  <div id="main">
+
+    <!-- Top bar -->
+    <div id="topbar">
+      <div class="pill clickable" id="pill-sport">🏀 MBB ▾</div>
+      <div class="pill" id="pill-opp">vs MIAMI</div>
+      <div class="pill" id="pill-vid">📹 ZK</div>
+      <div class="pill" id="pill-phase">⏱ PRE</div>
+      <div class="pill" id="pill-folder">📁 No folder</div>
+      <button class="btn-rename">Batch Rename</button>
+    </div>
+
+    <!-- Content (Tag Mode) -->
+    <div id="content">
+
+      <!-- Now Tagging card -->
+      <div class="now-card" id="tag-section">
+
+        <div class="now-filename" id="now-filename">MBB_MIAMI_20260117_143022_ZK_2H.mp4</div>
+
+        <div class="now-card-inner">
+          <!-- Left -->
+          <div class="card-left">
+            <div class="steps-row">
+              <div class="step-item">
+                <div class="step-circle active" id="circle-0" onclick="setStep(0)">1</div>
+                <div class="step-label active" id="label-0">PLAYER</div>
+              </div>
+              <div class="step-connector"></div>
+              <div class="step-item">
+                <div class="step-circle" id="circle-1" onclick="setStep(1)">2</div>
+                <div class="step-label" id="label-1">PLAY</div>
+              </div>
+              <div class="step-connector"></div>
+              <div class="step-item">
+                <div class="step-circle" id="circle-2" onclick="setStep(2)">3</div>
+                <div class="step-label" id="label-2">RATING</div>
+              </div>
+            </div>
+            <div class="tag-preview" id="tag-preview">—</div>
+            <div class="card-hint">SPACE &nbsp;preview &nbsp;·&nbsp; ENTER &nbsp;tag &nbsp;·&nbsp; ESC &nbsp;cancel</div>
+          </div>
+
+          <!-- Right: thumbnail -->
+          <div class="card-right">
+            <div class="thumb">▶</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Shortcut cards -->
+      <div class="sc-row" id="sc-row">
+        <div class="sc-card active-card" id="card-players">
+          <div class="sc-title">Players</div>
+          <div class="sc-pills" id="pills-players"></div>
+        </div>
+        <div class="sc-card" id="card-plays">
+          <div class="sc-title">Plays</div>
+          <div class="sc-pills" id="pills-plays"></div>
+        </div>
+        <div class="sc-card" id="card-ratings">
+          <div class="sc-title">Ratings</div>
+          <div class="sc-pills" id="pills-ratings"></div>
+        </div>
+      </div>
+
+      <!-- Players section -->
+      <div id="players-section">
+        <div class="players-header">
+          <div class="players-title">Players</div>
+          <div class="players-count" id="players-count">0 players</div>
+          <div class="players-actions">
+            <button class="btn-secondary" onclick="loadRoster()">Load Roster ↓</button>
+            <button class="btn-primary" onclick="addPlayer()">+ Add Player</button>
+          </div>
+        </div>
+        <div class="players-grid" id="players-grid"></div>
+      </div>
+
+      <!-- Plays section -->
+      <div id="plays-section">
+        <div class="players-header">
+          <div class="players-title">Plays</div>
+          <div class="players-count" id="plays-count">0 plays</div>
+          <div class="players-actions">
+            <button class="btn-primary" onclick="addPlay()">+ Add Play</button>
+          </div>
+        </div>
+        <div class="players-grid" id="plays-grid"></div>
+      </div>
+
+      <!-- Ratings section -->
+      <div id="ratings-section">
+        <div class="players-header">
+          <div class="players-title">Ratings</div>
+          <div class="players-count" id="ratings-count">0 ratings</div>
+          <div class="players-actions">
+            <button class="btn-primary" onclick="addRating()">+ Add Rating</button>
+          </div>
+        </div>
+        <div class="players-grid" id="ratings-grid"></div>
+      </div>
+
+      <!-- Session section -->
+      <div id="session-section">
+        <div class="players-header">
+          <div class="players-title">Session</div>
+          <div class="players-actions">
+            <button class="btn-primary" onclick="saveSession()">Save Session</button>
+          </div>
+        </div>
+        <div class="session-form">
+          <div class="form-row">
+            <span class="form-label">Sport</span>
+            <div class="form-field-wrap">
+              <button class="form-dropdown" id="session-sport-btn">MBB  ▾</button>
+            </div>
+          </div>
+          <div class="form-row">
+            <span class="form-label">Opponent</span>
+            <div class="form-field-wrap">
+              <input class="form-input" type="text" id="session-opponent" value="MIAMI">
+            </div>
+          </div>
+          <div class="form-row">
+            <span class="form-label">Videographer</span>
+            <div class="form-field-wrap">
+              <input class="form-input" type="text" id="session-videographer" value="ZK">
+            </div>
+          </div>
+          <div class="form-row">
+            <span class="form-label">Phase</span>
+            <div class="form-field-wrap">
+              <button class="form-dropdown" id="session-phase-btn">PRE  ▾</button>
+            </div>
+          </div>
+          <div class="form-row">
+            <span class="form-label">Folder</span>
+            <div class="form-field-wrap">
+              <span class="form-path" id="session-folder-label">No folder selected</span>
+              <button class="btn-secondary" onclick="chooseFolder()">Choose Folder…</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Help section -->
+      <div id="help-section">
+        <div class="players-header">
+          <div class="players-title">Help</div>
+        </div>
+        <div class="help-body">
+          <nav class="help-toc" id="help-toc"></nav>
+          <div class="help-content" id="help-content"></div>
+        </div>
+      </div>
+
+      <!-- Placeholder for unknown future sections -->
+      <div id="placeholder">
+        <h2 id="placeholder-title">Section</h2>
+        <p id="placeholder-sub">Section coming soon</p>
+      </div>
+    </div>
+
+    <!-- Status bar -->
+    <div id="statusbar">
+      <div id="status-dot"></div>
+      <span>Live preview · watching <strong id="watch-file">renamer.py</strong></span>
+      <span id="last-saved"></span>
+    </div>
+
+  </div><!-- /main -->
+</div><!-- /app -->
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+let currentStep = 0;
+let currentSection = "tag";
+const stepTags = { 0: null, 1: null, 2: null };
+
+// ── Render UI from server state ───────────────────────────────────────────────
+async function refresh() {
+  let state;
+  try {
+    const r = await fetch("/state");
+    state = await r.json();
+  } catch (e) {
+    document.getElementById("status-dot").style.background = "#c0392b";
+    return;
+  }
+
+  const s = state.session;
+
+  // Pills
+  document.getElementById("pill-sport").textContent  = `${s.sport_emoji} ${s.sport} ▾`;
+  document.getElementById("pill-opp").textContent    = `vs ${s.opponent}`;
+  document.getElementById("pill-vid").textContent    = `📹 ${s.videographer}`;
+  document.getElementById("pill-phase").textContent  = `⏱ ${s.phase}`;
+  document.getElementById("pill-folder").textContent = `📁 ${s.folder}`;
+
+  // Shortcut cards
+  const banks = ["players", "plays", "ratings"];
+  banks.forEach(bank => {
+    const container = document.getElementById(`pills-${bank}`);
+    container.innerHTML = "";
+    (state.shortcuts[bank] || []).forEach(sc => {
+      const pill = document.createElement("div");
+      pill.className = "sc-pill";
+      pill.innerHTML = `<span class="key">${sc.key}</span><span class="lbl">${sc.label}</span>`;
+      container.appendChild(pill);
+    });
+  });
+
+  // Management grids
+  renderPlayersGrid(state.shortcuts.players || []);
+  renderPlaysGrid(state.shortcuts.plays     || []);
+  renderRatingsGrid(state.shortcuts.ratings || []);
+
+  // Session form
+  const sess = state.session;
+  const sportBtn = document.getElementById("session-sport-btn");
+  if (sportBtn) sportBtn.textContent = `${sess.sport}  ▾`;
+  const oppField = document.getElementById("session-opponent");
+  if (oppField) oppField.value = sess.opponent || "";
+  const vidField = document.getElementById("session-videographer");
+  if (vidField) vidField.value = sess.videographer || "";
+  const phaseBtn = document.getElementById("session-phase-btn");
+  if (phaseBtn) phaseBtn.textContent = `${sess.phase}  ▾`;
+  const folderLbl = document.getElementById("session-folder-label");
+  if (folderLbl) folderLbl.textContent = sess.folder || "No folder selected";
+
+  // Status bar
+  document.getElementById("watch-file").textContent = state.watch_file;
+  if (state.last_saved) {
+    document.getElementById("last-saved").textContent = `Last saved: ${state.last_saved}`;
+  }
+
+  document.getElementById("status-dot").style.background = "#1a7f3c";
+}
+
+// ── Step indicator ────────────────────────────────────────────────────────────
+function setStep(n) {
+  currentStep = n;
+  for (let i = 0; i < 3; i++) {
+    const c = document.getElementById(`circle-${i}`);
+    const l = document.getElementById(`label-${i}`);
+    c.className = "step-circle" + (i < n ? " done" : i === n ? " active" : "");
+    l.className = "step-label"  + (i < n ? " done" : i === n ? " active" : "");
+  }
+  // Highlight the matching shortcut card
+  ["players","plays","ratings"].forEach((b,i) => {
+    document.getElementById(`card-${b}`).classList.toggle("active-card", i === n);
+  });
+  updateTagPreview();
+}
+
+function updateTagPreview() {
+  const parts = [
+    stepTags[0] !== null ? stepTags[0] : (currentStep > 0 ? "(skip)" : ""),
+    stepTags[1] !== null ? stepTags[1] : "",
+    stepTags[2] !== null ? stepTags[2] : "",
+  ].filter(Boolean);
+  document.getElementById("tag-preview").textContent = parts.join("_") || "—";
+}
+
+// ── Nav / section switching ───────────────────────────────────────────────────
+function selectSection(key) {
+  currentSection = key;
+  document.querySelectorAll(".nav-item").forEach(el => {
+    el.classList.toggle("active", el.dataset.section === key);
+  });
+
+  const isTag     = key === "tag";
+  const isPlayers = key === "players";
+  const isPlays   = key === "plays";
+  const isRatings = key === "ratings";
+  const isSession = key === "session";
+  const isHelp    = key === "help";
+  const isPlaceholder = !isTag && !isPlayers && !isPlays && !isRatings && !isSession && !isHelp;
+
+  document.getElementById("tag-section").style.display      = isTag     ? ""     : "none";
+  document.getElementById("sc-row").style.display           = isTag     ? ""     : "none";
+  document.getElementById("players-section").style.display  = isPlayers ? "flex" : "none";
+  document.getElementById("plays-section").style.display    = isPlays   ? "flex" : "none";
+  document.getElementById("ratings-section").style.display  = isRatings ? "flex" : "none";
+  document.getElementById("session-section").style.display  = isSession ? "flex" : "none";
+  document.getElementById("help-section").style.display     = isHelp    ? "flex" : "none";
+  document.getElementById("placeholder").style.display      = isPlaceholder ? "flex" : "none";
+
+  if (isPlaceholder) {
+    document.getElementById("placeholder-title").textContent = key;
+  }
+}
+
+// ── Players grid ──────────────────────────────────────────────────────────────
+function renderPlayersGrid(items) {
+  const grid  = document.getElementById("players-grid");
+  const count = document.getElementById("players-count");
+  count.textContent = `${items.length} player${items.length === 1 ? "" : "s"}`;
+  grid.innerHTML = "";
+
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "players-empty";
+    empty.textContent = 'No players yet — click "+ Add Player" or "Load Roster ↓" above.';
+    grid.appendChild(empty);
+    return;
+  }
+
+  items.forEach((sc, idx) => {
+    const pill = document.createElement("div");
+    pill.className = "player-pill";
+    pill.innerHTML = `
+      <div class="key-badge">${(sc.key || "").toUpperCase()}</div>
+      <div class="player-name">${sc.label}</div>
+      <button class="icon-btn" title="Edit"   onclick="editPlayer(${idx})">✎</button>
+      <button class="icon-btn" title="Delete" onclick="deletePlayer(${idx})">🗑</button>
+    `;
+    grid.appendChild(pill);
+  });
+}
+
+// ── Plays grid ────────────────────────────────────────────────────────────────
+function renderPlaysGrid(items) {
+  const grid  = document.getElementById("plays-grid");
+  const count = document.getElementById("plays-count");
+  count.textContent = `${items.length} play${items.length === 1 ? "" : "s"}`;
+  grid.innerHTML = "";
+
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "players-empty";
+    empty.textContent = 'No plays yet — click "+ Add Play" above.';
+    grid.appendChild(empty);
+    return;
+  }
+
+  items.forEach((sc, idx) => {
+    const pill = document.createElement("div");
+    pill.className = "player-pill";
+    pill.innerHTML = `
+      <div class="key-badge">${(sc.key || "").toUpperCase()}</div>
+      <div class="player-name">${sc.label}</div>
+      <button class="icon-btn" title="Edit"   onclick="editPlay(${idx})">✎</button>
+      <button class="icon-btn" title="Delete" onclick="deletePlay(${idx})">🗑</button>
+    `;
+    grid.appendChild(pill);
+  });
+}
+
+// ── Ratings grid ──────────────────────────────────────────────────────────────
+function renderRatingsGrid(items) {
+  const grid  = document.getElementById("ratings-grid");
+  const count = document.getElementById("ratings-count");
+  count.textContent = `${items.length} rating${items.length === 1 ? "" : "s"}`;
+  grid.innerHTML = "";
+
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "players-empty";
+    empty.textContent = 'No ratings yet — click "+ Add Rating" above.';
+    grid.appendChild(empty);
+    return;
+  }
+
+  items.forEach((sc, idx) => {
+    const pill = document.createElement("div");
+    pill.className = "player-pill";
+    pill.innerHTML = `
+      <div class="key-badge">${(sc.key || "").toUpperCase()}</div>
+      <div class="player-name">${sc.label}</div>
+      <button class="icon-btn" title="Edit"   onclick="editRating(${idx})">✎</button>
+      <button class="icon-btn" title="Delete" onclick="deleteRating(${idx})">🗑</button>
+    `;
+    grid.appendChild(pill);
+  });
+}
+
+// ── Help section ──────────────────────────────────────────────────────────────
+const HELP_SECTIONS = [
+  { id: "overview", title: "Overview",
+    body: `EZ Logger is a 3-step logging tool for organizing sports footage. Configure your session once, then use Log Mode to assign a Player, Play, and Rating shortcut to each video clip. The log is appended to the filename.\n\nLogging flow:   Player  →  Play  →  Rating` },
+  { id: "setup-session", title: "Setup Session",
+    body: `Configure your session in the Session tab before logging:\n\nSport               Select your sport from the dropdown  (MBB, WBB, MHK, WHK, FB…)\nOpponent          Enter the opposing team code  (e.g. MIAMI, DUKE, YALE)\nVideographer    Your initials or operator code  (e.g. ZK)\nPhase               Game phase  (PRE, 1H, 2H, OT, POST, PRAC, SCOUT)\nFolder              The folder containing your video files\n\nClick Save Session to apply. The top bar updates immediately.` },
+  { id: "tag-mode", title: "Log Mode",
+    body: `Log Mode adds shortcut labels to individual video files:\n\n1    Select a file from the file list\n2    Press SPACE to QuickLook preview the clip  (optional)\n3    Press ENTER to begin logging\n4    Press your Player shortcut key  (or any key to skip player)\n5    Press your Play shortcut key\n6    Press your Rating shortcut key  →  file is logged ✓\n\nThe log is appended and the next file is selected automatically. Press ESC at any time to cancel.` },
+  { id: "managing-shortcuts", title: "Managing Shortcuts",
+    body: `Each bank (Players, Plays, Ratings) has its own set of shortcut keys.\n\nPlayers       Use "Load Roster ↓" to auto-load from BC Athletics, or add manually\nPlays           Add your play types  (e.g. LAYUP, THREE, DRIVE, POST UP)\nRatings        Add outcome codes  (e.g. GOOD, MISS, FOUL, TO)\n\nIn each section:\n  ·  Click the pencil icon to edit a shortcut key or label\n  ·  Click the trash icon to delete a shortcut\n  ·  Click "+ Add…" to create a new entry  (one key + one label)` },
+  { id: "batch-rename", title: "Batch Rename",
+    body: `Batch Rename standardizes all video filenames in the selected folder using each file's creation timestamp. Run it before logging to apply the base name format:\n\n  SPORT_OPPONENT_YYYYMMDD_HHMMSS_VID_PHASE.ext\n\nExample:   MBB_MIAMI_20260117_143022_ZK_2H.mp4\n\nNote: Batch Rename is currently disabled in preview mode.` },
+  { id: "filename-format", title: "Filename Format",
+    body: `Tagged filenames follow this structure:\n\n  SPORT_OPPONENT_YYYYMMDD_HHMMSS_VID_PHASE_PLAYER_PLAY_RATING.ext\n\nExample:   MBB_MIAMI_20260117_143022_ZK_2H_HAND_LAYUP_GOOD.mp4\n\nSPORT          sport code  (MBB, WBB, MHK…)\nOPPONENT     opposing team\nYYYYMMDD    file creation date\nHHMMSS         file creation time\nVID               videographer initials\nPHASE           game phase  (1H, 2H, OT…)\nPLAYER          player last name  (optional — omitted if skipped)\nPLAY              play type label\nRATING          outcome label` },
+  { id: "keyboard-reference", title: "Keyboard Reference",
+    body: `In Log Mode:\n\nSPACE        QuickLook preview of the selected file\nENTER         Begin logging  ·  confirm step and advance\nESC             Cancel the current log, return to idle\n[key]            Apply shortcut  (player / play / rating key)\n\nIn the file list:\n\n↑ / ↓          Navigate between files` },
+];
+
+(function buildHelp() {
+  const toc     = document.getElementById("help-toc");
+  const content = document.getElementById("help-content");
+  if (!toc || !content) return;
+
+  const hdr = document.createElement("div");
+  hdr.className = "toc-header";
+  hdr.textContent = "CONTENTS";
+  toc.appendChild(hdr);
+
+  HELP_SECTIONS.forEach((sec, idx) => {
+    // TOC item
+    const item = document.createElement("div");
+    item.className = "toc-item" + (idx === 0 ? " active" : "");
+    item.textContent = sec.title;
+    item.onclick = () => helpScrollTo(idx);
+    toc.appendChild(item);
+
+    // Content entry
+    const entry = document.createElement("div");
+    entry.className = "help-entry";
+    entry.id = `help-entry-${idx}`;
+    entry.innerHTML = `<div class="help-entry-title">${sec.title}</div>`
+                    + `<div class="help-entry-body">${sec.body}</div>`;
+    content.appendChild(entry);
+
+    if (idx < HELP_SECTIONS.length - 1) {
+      const divider = document.createElement("hr");
+      divider.className = "help-divider";
+      content.appendChild(divider);
+    }
+  });
+})();
+
+function helpScrollTo(idx) {
+  const tocItems = document.querySelectorAll(".toc-item");
+  tocItems.forEach((el, i) => el.classList.toggle("active", i === idx));
+
+  const entry = document.getElementById(`help-entry-${idx}`);
+  if (entry) entry.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function addPlayer()         { /* preview-only stub */ }
+function editPlayer(idx)     { /* preview-only stub */ }
+function deletePlayer(idx)   { /* preview-only stub */ }
+function loadRoster()        { /* preview-only stub */ }
+function addPlay()           { /* preview-only stub */ }
+function editPlay(idx)       { /* preview-only stub */ }
+function deletePlay(idx)     { /* preview-only stub */ }
+function addRating()         { /* preview-only stub */ }
+function editRating(idx)     { /* preview-only stub */ }
+function deleteRating(idx)   { /* preview-only stub */ }
+function saveSession()       { /* preview-only stub */ }
+function chooseFolder()      { /* preview-only stub */ }
+
+// ── SSE live reload ───────────────────────────────────────────────────────────
+function connectSSE() {
+  const es = new EventSource("/events");
+  es.onmessage = async e => {
+    if (e.data === "reload") {
+      await refresh();
+      const badge = document.getElementById("reload-badge");
+      badge.classList.add("show");
+      setTimeout(() => badge.classList.remove("show"), 1600);
+    }
+  };
+  es.onerror = () => {
+    document.getElementById("status-dot").style.background = "#febc2e";
+    setTimeout(connectSSE, 3000);  // auto-reconnect
+  };
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+refresh();
+connectSSE();
+</script>
+</body>
+</html>

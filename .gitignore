@@ -1,0 +1,25 @@
+# Build outputs
+build/
+dist/
+*.egg-info/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# macOS
+.DS_Store
+*.DS_Store
+.AppleDouble
+.LSOverride
+
+# py2app
+.Python
+
+# Secrets (never commit these)
+*.p12
+*.pem
+*.cer
+entitlements.plist
+notarize_creds.sh
