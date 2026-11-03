@@ -17,6 +17,8 @@ import urllib.request
 from pathlib import Path
 from datetime import datetime
 
+APP_VERSION = "1.0.0"
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 CONFIG_FILE    = os.path.expanduser("~/.bball_renamer_v3_config.json")
 SHORTCUTS_FILE = os.path.expanduser("~/.bball_renamer_v3_shortcuts.json")
@@ -1491,7 +1493,7 @@ class TagWindowV2:
         self.win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             rect, style, NSBackingStoreBuffered, False
         )
-        self.win.setTitle_("EZ Logger")
+        self.win.setTitle_(f"EZ Logger {APP_VERSION}")
         self.win.setReleasedWhenClosed_(False)
         self.win.setTitlebarAppearsTransparent_(True)
         try:
@@ -7242,7 +7244,7 @@ class TagWindowV2:
         return [
             ("Overview", [
                 ("para",
-                 "EZ Logger is a keyboard-driven tool for tagging sports video files. "
+                 f"EZ Logger v{APP_VERSION} — a keyboard-driven tool for tagging sports video files. "
                  "Set up your session once, then use Log Mode to tag each clip — the label "
                  "appends directly to the filename."),
                 ("subhead", "LOGGING FLOW"),

@@ -3,8 +3,14 @@ py2app setup file — builds EZ Logger into a proper Mac .app
 Run via build.sh
 """
 from setuptools import setup
+import re
 
-APP     = ["renamer.py"]
+# Pull version from the single source of truth in renamer.py
+with open("renamer.py") as f:
+    _ver_match = re.search(r'^APP_VERSION\s*=\s*"([^"]+)"', f.read(), re.MULTILINE)
+    APP_VERSION = _ver_match.group(1) if _ver_match else "1.0.0"
+
+APP      = ["renamer.py"]
 APP_NAME = "EZ Logger"
 
 OPTIONS = {
@@ -13,8 +19,8 @@ OPTIONS = {
         "CFBundleName":               APP_NAME,
         "CFBundleDisplayName":        APP_NAME,
         "CFBundleIdentifier":         "com.bball.renamer",
-        "CFBundleVersion":            "3.0.0",
-        "CFBundleShortVersionString": "3.0",
+        "CFBundleVersion":            APP_VERSION,
+        "CFBundleShortVersionString": APP_VERSION,
         "NSHighResolutionCapable":    True,
         "LSUIElement":                False,
         "NSAppleEventsUsageDescription":
