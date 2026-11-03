@@ -1,4 +1,4 @@
-# 🏀 Basketball Renamer v3
+# 🏀 EZ Logger
 
 Menubar app for tagging and renaming basketball video files.
 3-step flow: Player → Play → Rating
