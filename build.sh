@@ -59,9 +59,29 @@ echo ""
 
 # ── Sign + Notarize (only with --sign flag) ───────────────────────
 if [ "$SIGN" = true ]; then
-    echo "🔏 Signing the app..."
-    codesign --deep --force --options runtime \
+    echo "🔏 Signing all binaries inside the app..."
+    # Sign every binary individually (--deep misses --options runtime on nested binaries)
+    find "$APP_PATH" -type f \( -name "*.so" -o -name "*.dylib" -o -name "python*" -o -name "Python" \) | while read -r bin; do
+        codesign --force --options runtime \
+          --sign "$SIGN_ID" \
+          --timestamp \
+          "$bin" 2>/dev/null || true
+    done
+    # Sign framework bundles
+    find "$APP_PATH" -name "*.framework" -type d | while read -r fw; do
+        codesign --force --options runtime \
+          --sign "$SIGN_ID" \
+          --timestamp \
+          "$fw" 2>/dev/null || true
+    done
+    # Sign the main executable and the app bundle last
+    codesign --force --options runtime \
       --sign "$SIGN_ID" \
+      --timestamp \
+      "$APP_PATH/Contents/MacOS/EZ Logger"
+    codesign --force --options runtime \
+      --sign "$SIGN_ID" \
+      --timestamp \
       "$APP_PATH"
     echo "✅ Signed."
     echo ""
@@ -85,9 +105,26 @@ if [ "$SIGN" = true ]; then
 
     rm -f "$ZIP_PATH"
 
+    echo "💿 Creating .dmg..."
+    APP_VERSION=$($PYTHON -c "import re; m=re.search(r'APP_VERSION\s*=\s*\"([^\"]+)\"', open('renamer.py').read()); print(m.group(1))")
+    DMG_PATH="dist/EZLogger-${APP_VERSION}.dmg"
+    rm -f "$DMG_PATH"
+    create-dmg \
+      --volname "EZ Logger" \
+      --window-pos 200 120 \
+      --window-size 600 400 \
+      --icon-size 100 \
+      --icon "EZ Logger.app" 175 190 \
+      --hide-extension "EZ Logger.app" \
+      --app-drop-link 425 190 \
+      "$DMG_PATH" \
+      "$APP_PATH"
+    echo "✅ DMG created: $DMG_PATH"
+    echo ""
+
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  ✅ Signed, notarized, and ready to distribute."
-    echo "  Drag 'EZ Logger.app' from dist/ to share."
+    echo "  Share: dist/EZLogger-${APP_VERSION}.dmg"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 else
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
