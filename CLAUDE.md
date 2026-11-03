@@ -24,13 +24,24 @@ bash launch.sh
 ```
 Requires `pip install watchdog` for instant reloads (falls back to 1s polling otherwise). The watcher only watches `renamer.py` — touch it to reload after editing `preview.html`.
 
-**Build the distributable .app:**
+**Build the distributable .app (unsigned, local dev):**
 ```bash
 bash build.sh
 ```
-Requires Homebrew Python 3.11 at `/opt/homebrew/bin/python3.11`. Output is `dist/EZ Logger.app`.
+Output is `dist/EZ Logger.app`. Requires Homebrew Python 3.11 at `/opt/homebrew/bin/python3.11`.
 
-**Distribution target:** Apple Silicon only (arm64), macOS 12+. Before building for sharing, set `MACOSX_DEPLOYMENT_TARGET=12.0` in `build.sh`. Coworkers right-click → Open to bypass Gatekeeper on first launch — no Terminal needed on their end. No Intel/universal2 support needed.
+**Build signed, notarized, stapled DMG for distribution:**
+```bash
+bash build.sh --sign
+```
+Requires the Developer ID Application certificate (`3XQ36X2RC9`) and notarize credentials stored in Keychain under profile `ez-logger-notarize`. Output is `dist/EZLogger-{VERSION}.dmg`. Signs all nested `.so`/`.dylib`/Python binaries individually before signing the bundle — `--deep` alone is insufficient for notarization.
+
+**Publish a release to GitHub:**
+```bash
+gh release create vX.X.X "dist/EZLogger-X.X.X.dmg" --title "EZ Logger vX.X.X" --notes "..."
+```
+
+**Distribution target:** Apple Silicon only (arm64), macOS 12+. No Intel/universal2 support needed.
 
 **Syntax-check without running:**
 ```bash
@@ -52,6 +63,14 @@ Run pytest after every change. Tests cover `_parse_roster_html`, `roster_to_shor
 ## Architecture
 
 All application logic lives in a single file: **`renamer.py`** (~8 400 lines).
+
+### Module-top constants
+
+`APP_VERSION` — single source of truth for the version string. Read by `setup.py` at build time (via regex), displayed in the window title and Help section, included in crash reports, and compared against GitHub releases by the update checker.
+
+`CRASH_LOG_DIR` / `CRASH_EMAIL_TO` / `CRASH_EMAIL_FROM` — crash reporter config. `_crash_handler` is installed as `sys.excepthook` at module load; on any unhandled exception it writes a log to `~/.ezlogger/crashes/` and emails a report via Gmail SMTP SSL. The Gmail app-specific password is retrieved from macOS Keychain (service `ez-logger-crash-reporter`) — never hardcoded.
+
+`UPDATE_CHECK_URL` — GitHub API endpoint for the latest release. `_check_for_updates_bg(callback)` fetches it in a background thread; if the remote tag is newer than `APP_VERSION` it calls `callback(version, url)`.
 
 ### Persistent state (ten JSON files in `~`)
 
@@ -76,7 +95,7 @@ All application logic lives in a single file: **`renamer.py`** (~8 400 lines).
 
 **`StatsWindow`** (line ~7235) — dead code. Never instantiated; `BasketballRenamerApp.open_stats()` navigates the existing `TagWindowV2` to its stats section instead.
 
-**`BasketballRenamerApp`** (line ~7725) (`rumps.App`) — menubar entry point. Auto-opens `TagWindowV2` 0.1s after launch via `rumps.Timer`. Owns `self.session` and `self.shortcuts`. Handles `batch_rename`, `undo_last`, `setup_session`, roster loading.
+**`BasketballRenamerApp`** (line ~7725) (`rumps.App`) — menubar entry point. Auto-opens `TagWindowV2` 0.1s after launch via `rumps.Timer`. Owns `self.session` and `self.shortcuts`. Handles `batch_rename`, `undo_last`, `setup_session`, roster loading. Spawns a daemon thread at startup to check GitHub for a newer release (`_run_update_check`) and fires a `rumps.notification` if one is found.
 
 ### Menubar
 
