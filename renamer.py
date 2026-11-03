@@ -14,10 +14,67 @@ import re
 import subprocess
 import threading
 import urllib.request
+import sys
+import traceback
+import smtplib
+import platform
+from email.mime.text import MIMEText
 from pathlib import Path
 from datetime import datetime
 
 APP_VERSION = "1.0.0"
+
+CRASH_LOG_DIR  = os.path.expanduser("~/.ezlogger/crashes")
+CRASH_EMAIL_TO = "zachjkeding@gmail.com"
+CRASH_EMAIL_FROM = "zachjkeding@gmail.com"
+
+def _get_crash_email_password():
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-a", CRASH_EMAIL_FROM,
+             "-s", "ez-logger-crash-reporter", "-w"],
+            capture_output=True, text=True, timeout=5
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+    except Exception:
+        return None
+
+def _send_crash_email(subject, body):
+    try:
+        password = _get_crash_email_password()
+        if not password:
+            return
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"]    = CRASH_EMAIL_FROM
+        msg["To"]      = CRASH_EMAIL_TO
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as smtp:
+            smtp.login(CRASH_EMAIL_FROM, password)
+            smtp.send_message(msg)
+    except Exception:
+        pass  # never let crash reporting crash the app
+
+def _crash_handler(exc_type, exc_value, exc_tb):
+    os.makedirs(CRASH_LOG_DIR, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    body = (
+        f"EZ Logger v{APP_VERSION} crash report\n"
+        f"Time:    {datetime.now().isoformat()}\n"
+        f"macOS:   {platform.mac_ver()[0]}\n"
+        f"Python:  {sys.version.split()[0]}\n\n"
+        f"{tb_str}"
+    )
+    log_path = os.path.join(CRASH_LOG_DIR, f"crash_{timestamp}.txt")
+    try:
+        with open(log_path, "w") as f:
+            f.write(body)
+    except Exception:
+        pass
+    _send_crash_email(f"EZ Logger v{APP_VERSION} crash — {timestamp}", body)
+    sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+sys.excepthook = _crash_handler
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 CONFIG_FILE    = os.path.expanduser("~/.bball_renamer_v3_config.json")
