@@ -1,78 +1,74 @@
 # 🏀 EZ Logger
 
-Menubar app for tagging and renaming basketball video files.
-3-step flow: Player → Play → Rating
+A keyboard-driven macOS menubar app for logging and renaming sports video files. Built for video coordinators who need to tag and organize footage fast.
+
+**[⬇ Download EZ Logger](https://github.com/EZ-LOGGER/ez-logger/releases/latest)**
 
 ---
 
-## Install & Build (One Time)
+## Install
 
-**Step 1** — Open Terminal (`Cmd+Space` → Terminal → Enter)
+1. Download `EZLogger-X.X.X.dmg` from the [latest release](https://github.com/EZ-LOGGER/ez-logger/releases/latest)
+2. Open the DMG and drag **EZ Logger** into your `/Applications` folder
+3. Launch from Spotlight (`Cmd+Space` → EZ Logger)
+4. The 🏀 icon appears in your menubar
 
-**Step 2** — Navigate to this folder:
-```bash
-cd ~/Downloads/BasketballRenamer3
-```
-
-**Step 3** — Make the build script executable:
-```bash
-chmod +x build.sh launch.sh
-```
-
-**Step 4** — Build the app:
-```bash
-bash build.sh
-```
-Takes 2-4 minutes. A Finder window opens automatically when done.
-
-**Step 5** — Drag `Basketball Renamer.app` from the `dist/` folder into `/Applications`
-
-**Step 6** — Launch from Spotlight (`Cmd+Space` → Basketball Renamer → Enter)
-The 🏀 icon appears in your menubar.
+> **First launch:** macOS may show "unidentified developer" — right-click the app → Open → Open to bypass. This is a one-time step.
 
 ---
 
-## Daily Workflow
+## What it does
 
-**1️⃣ Setup Session** — Set Sport, Opponent, Videographer, Phase, and Footage folder (once per game)
+EZ Logger gives you a keyboard-driven tagging window for sports video. After a batch rename stamps your files with timestamps, you work through the file list pressing hotkeys to log Player → Play → Rating — the filename is updated instantly with no clicking required.
 
-**2️⃣ Batch Rename** — Renames all videos in the folder using file creation timestamps
-
-**3️⃣ Tag Mode** — Opens the tagging window:
-- Click a file to select it
-- SPACE → QuickLook preview
-- ENTER → Start tagging (Step 1: Player)
-- Press number key for Player (or any unassigned key to skip)
-- Press number key for Play
-- Press number key for Rating → file renamed ✅
-- ESC → cancel current tag
+**Key features:**
+- Configurable labeling steps (not just basketball — any sport, any workflow)
+- Shortcut banks per step with branching label trees
+- Multi-action chains: tag one clip to multiple players with `=`
+- Schedule import: pull opponents directly from your athletic department's schedule page
+- Stats tracking: per-player play/rating breakdowns across sessions
+- Naming convention editor with date/time metadata fields
+- Undo stack for the last 50 renames
 
 ---
 
-## Filename Format
+## Workflow
 
-`SPORT_OPPONENT_YYYYMMDD_HHMMSS_VID_PHASE_PLAYER_PLAY_RATING.ext`
+**1. Setup Session** — Set sport, opponent, videographer, phase, and footage folder (once per game)
 
-Example: `MBB_SYRACUSE_20260117_143022_ZK_2H_HAND_DRIVE_GOOD.mp4`
+**2. Batch Rename** — Stamps all videos in the folder with file creation timestamps
 
----
-
-## Auto-Launch at Login
-System Settings → General → Login Items → + → add Basketball Renamer.app
-
----
-
-## Troubleshooting
-
-**"Unidentified developer" warning:** Right-click → Open → Open
-
-**Tag Mode window doesn't appear:** Make sure Basketball Renamer has Accessibility access:
-System Settings → Privacy & Security → Accessibility → toggle on Basketball Renamer
-
-**Permission denied on build.sh:** Run `chmod +x build.sh` first
+**3. Tag** — Click a file, press ENTER to start tagging:
+- ENTER → advance step (Player → Play → Rating → saves)
+- Number/letter key → select shortcut
+- `=` → chain to another player without saving
+- ⌥ Option → type a custom label
+- TAB → next file
+- ESC → cancel
 
 ---
 
-## Updating
-Get new version → run `bash build.sh` → drag new .app to Applications (replace old).
-Your shortcuts and session settings are always preserved.
+## Filename format
+
+`SPORT_OPP_YYYYMMDD_HHMMSS_PHASE_PLAYER_PLAY_RATING.ext`
+
+Example: `MBB_SYR_20260215_143022_2H_HAND_DRIVE_GOOD.mp4`
+
+---
+
+## System requirements
+
+- macOS 12 (Monterey) or later
+- Apple Silicon (M1 or later)
+
+---
+
+## Auto-launch at login
+
+Settings → System → Launch at Login
+
+---
+
+## Support
+
+Found a bug or have a feature request? [Open an issue](https://github.com/EZ-LOGGER/ez-logger/issues) on GitHub.

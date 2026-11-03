@@ -76,6 +76,29 @@ def _crash_handler(exc_type, exc_value, exc_tb):
 
 sys.excepthook = _crash_handler
 
+# ── Update checker ────────────────────────────────────────────────────────────
+UPDATE_CHECK_URL = "https://api.github.com/repos/EZ-LOGGER/ez-logger/releases/latest"
+
+def _check_for_updates_bg(on_update_available):
+    """Fetch latest GitHub release version in background. Calls on_update_available(version, url) if newer."""
+    try:
+        req = urllib.request.Request(UPDATE_CHECK_URL, headers={"User-Agent": f"EZLogger/{APP_VERSION}"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode())
+        tag = data.get("tag_name", "").lstrip("v")
+        html_url = data.get("html_url", "")
+        if not tag:
+            return
+        def _parse(v):
+            try:
+                return tuple(int(x) for x in v.split("."))
+            except Exception:
+                return (0,)
+        if _parse(tag) > _parse(APP_VERSION):
+            on_update_available(tag, html_url)
+    except Exception:
+        pass
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 CONFIG_FILE    = os.path.expanduser("~/.bball_renamer_v3_config.json")
 SHORTCUTS_FILE = os.path.expanduser("~/.bball_renamer_v3_shortcuts.json")
@@ -7664,6 +7687,17 @@ class BasketballRenamerApp(rumps.App):
             except Exception:
                 pass
         rumps.Timer(self._auto_open, 0.1).start()
+        threading.Thread(target=self._run_update_check, daemon=True).start()
+
+    def _run_update_check(self):
+        def _notify(version, url):
+            rumps.notification(
+                title="EZ Logger Update Available",
+                subtitle=f"Version {version} is ready",
+                message="Visit github.com/EZ-LOGGER/ez-logger/releases to download.",
+                sound=False,
+            )
+        _check_for_updates_bg(_notify)
 
     def _migrate_shortcuts(self, data):
         """Migrate old flat {bank: [...]} format to nested {sport_key: {bank: [...]}}."""
