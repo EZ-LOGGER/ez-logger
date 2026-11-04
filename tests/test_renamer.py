@@ -341,3 +341,39 @@ def test_undo_skips_missing_files_and_reports():
     assert skipped  == 1
     assert (fp / "orig_b.mp4").exists()
     assert not (fp / "new_b.mp4").exists()
+
+
+# ── No school-specific defaults ───────────────────────────────────────────────
+
+def _isolate_roster_files(tmp_path, base_url):
+    """Point roster and settings files at tmp_path, with base_url as the saved URL."""
+    settings = tmp_path / "settings.json"
+    settings.write_text(renamer.json.dumps({"roster_base_url": base_url}))
+    return patch.multiple(
+        renamer,
+        SETTINGS_FILE=str(settings),
+        ROSTERS_FILE=str(tmp_path / "rosters.json"),
+        ROSTERS_META_FILE=str(tmp_path / "meta.json"),
+    )
+
+def test_fetch_roster_without_school_url_never_hits_network(tmp_path):
+    with _isolate_roster_files(tmp_path, ""), \
+         patch.object(renamer, "fetch_roster_from_url") as fetch:
+        assert renamer.fetch_roster("MBB") == []
+    fetch.assert_not_called()
+
+@pytest.mark.parametrize("saved", ["https://example.edu", "https://example.edu/"])
+def test_fetch_roster_uses_saved_school_url(tmp_path, saved):
+    with _isolate_roster_files(tmp_path, saved), \
+         patch.object(renamer, "fetch_roster_from_url", return_value=[("JONES", "1")]) as fetch:
+        assert renamer.fetch_roster("WHK") == [("JONES", "1")]
+    fetch.assert_called_once_with("https://example.edu/sports/womens-ice-hockey/roster")
+
+def test_every_sport_has_a_roster_slug():
+    assert set(renamer.SPORTS) == set(renamer.SLUG_TO_CODE.values())
+
+def test_defaults_have_no_school_or_personal_values():
+    assert renamer.DEFAULT_SHORTCUTS["players"] == []
+    assert renamer.DEFAULT_SESSION["opponent"] == "OPP"
+    assert renamer.DEFAULT_SESSION["videographer"] == "VID"
+    assert "bceagles" not in Path(renamer.__file__).read_text()

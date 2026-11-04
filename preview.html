@@ -695,7 +695,7 @@
     <div id="topbar">
       <div class="pill clickable" id="pill-sport">🏀 MBB ▾</div>
       <div class="pill" id="pill-opp">vs MIAMI</div>
-      <div class="pill" id="pill-vid">📹 ZK</div>
+      <div class="pill" id="pill-vid">📹 AB</div>
       <div class="pill" id="pill-phase">⏱ PRE</div>
       <div class="pill" id="pill-folder">📁 No folder</div>
       <button class="btn-rename">Batch Rename</button>
@@ -707,7 +707,7 @@
       <!-- Now Tagging card -->
       <div class="now-card" id="tag-section">
 
-        <div class="now-filename" id="now-filename">MBB_MIAMI_20260117_143022_ZK_2H.mp4</div>
+        <div class="now-filename" id="now-filename">MBB_MIAMI_20260117_143022_AB_2H.mp4</div>
 
         <div class="now-card-inner">
           <!-- Left -->
@@ -816,7 +816,7 @@
           <div class="form-row">
             <span class="form-label">Videographer</span>
             <div class="form-field-wrap">
-              <input class="form-input" type="text" id="session-videographer" value="ZK">
+              <input class="form-input" type="text" id="session-videographer" value="AB">
             </div>
           </div>
           <div class="form-row">
@@ -1072,15 +1072,15 @@ const HELP_SECTIONS = [
   { id: "overview", title: "Overview",
     body: `EZ Logger is a 3-step logging tool for organizing sports footage. Configure your session once, then use Log Mode to assign a Player, Play, and Rating shortcut to each video clip. The log is appended to the filename.\n\nLogging flow:   Player  →  Play  →  Rating` },
   { id: "setup-session", title: "Setup Session",
-    body: `Configure your session in the Session tab before logging:\n\nSport               Select your sport from the dropdown  (MBB, WBB, MHK, WHK, FB…)\nOpponent          Enter the opposing team code  (e.g. MIAMI, DUKE, YALE)\nVideographer    Your initials or operator code  (e.g. ZK)\nPhase               Game phase  (PRE, 1H, 2H, OT, POST, PRAC, SCOUT)\nFolder              The folder containing your video files\n\nClick Save Session to apply. The top bar updates immediately.` },
+    body: `Configure your session in the Session tab before logging:\n\nSport               Select your sport from the dropdown  (MBB, WBB, MHK, WHK, FB…)\nOpponent          Enter the opposing team code  (e.g. MIAMI, DUKE, YALE)\nVideographer    Your initials or operator code  (e.g. AB)\nPhase               Game phase  (PRE, 1H, 2H, OT, POST, PRAC, SCOUT)\nFolder              The folder containing your video files\n\nClick Save Session to apply. The top bar updates immediately.` },
   { id: "tag-mode", title: "Log Mode",
     body: `Log Mode adds shortcut labels to individual video files:\n\n1    Select a file from the file list\n2    Press SPACE to QuickLook preview the clip  (optional)\n3    Press ENTER to begin logging\n4    Press your Player shortcut key  (or any key to skip player)\n5    Press your Play shortcut key\n6    Press your Rating shortcut key  →  file is logged ✓\n\nThe log is appended and the next file is selected automatically. Press ESC at any time to cancel.` },
   { id: "managing-shortcuts", title: "Managing Shortcuts",
-    body: `Each bank (Players, Plays, Ratings) has its own set of shortcut keys.\n\nPlayers       Use "Load Roster ↓" to auto-load from BC Athletics, or add manually\nPlays           Add your play types  (e.g. LAYUP, THREE, DRIVE, POST UP)\nRatings        Add outcome codes  (e.g. GOOD, MISS, FOUL, TO)\n\nIn each section:\n  ·  Click the pencil icon to edit a shortcut key or label\n  ·  Click the trash icon to delete a shortcut\n  ·  Click "+ Add…" to create a new entry  (one key + one label)` },
+    body: `Each bank (Players, Plays, Ratings) has its own set of shortcut keys.\n\nPlayers       Use "Load Roster ↓" to auto-load from your school's website, or add manually\nPlays           Add your play types  (e.g. LAYUP, THREE, DRIVE, POST UP)\nRatings        Add outcome codes  (e.g. GOOD, MISS, FOUL, TO)\n\nIn each section:\n  ·  Click the pencil icon to edit a shortcut key or label\n  ·  Click the trash icon to delete a shortcut\n  ·  Click "+ Add…" to create a new entry  (one key + one label)` },
   { id: "batch-rename", title: "Batch Rename",
-    body: `Batch Rename standardizes all video filenames in the selected folder using each file's creation timestamp. Run it before logging to apply the base name format:\n\n  SPORT_OPPONENT_YYYYMMDD_HHMMSS_VID_PHASE.ext\n\nExample:   MBB_MIAMI_20260117_143022_ZK_2H.mp4\n\nNote: Batch Rename is currently disabled in preview mode.` },
+    body: `Batch Rename standardizes all video filenames in the selected folder using each file's creation timestamp. Run it before logging to apply the base name format:\n\n  SPORT_OPPONENT_YYYYMMDD_HHMMSS_VID_PHASE.ext\n\nExample:   MBB_MIAMI_20260117_143022_AB_2H.mp4\n\nNote: Batch Rename is currently disabled in preview mode.` },
   { id: "filename-format", title: "Filename Format",
-    body: `Tagged filenames follow this structure:\n\n  SPORT_OPPONENT_YYYYMMDD_HHMMSS_VID_PHASE_PLAYER_PLAY_RATING.ext\n\nExample:   MBB_MIAMI_20260117_143022_ZK_2H_HAND_LAYUP_GOOD.mp4\n\nSPORT          sport code  (MBB, WBB, MHK…)\nOPPONENT     opposing team\nYYYYMMDD    file creation date\nHHMMSS         file creation time\nVID               videographer initials\nPHASE           game phase  (1H, 2H, OT…)\nPLAYER          player last name  (optional — omitted if skipped)\nPLAY              play type label\nRATING          outcome label` },
+    body: `Tagged filenames follow this structure:\n\n  SPORT_OPPONENT_YYYYMMDD_HHMMSS_VID_PHASE_PLAYER_PLAY_RATING.ext\n\nExample:   MBB_MIAMI_20260117_143022_AB_2H_JONES_LAYUP_GOOD.mp4\n\nSPORT          sport code  (MBB, WBB, MHK…)\nOPPONENT     opposing team\nYYYYMMDD    file creation date\nHHMMSS         file creation time\nVID               videographer initials\nPHASE           game phase  (1H, 2H, OT…)\nPLAYER          player last name  (optional — omitted if skipped)\nPLAY              play type label\nRATING          outcome label` },
   { id: "keyboard-reference", title: "Keyboard Reference",
     body: `In Log Mode:\n\nSPACE        QuickLook preview of the selected file\nENTER         Begin logging  ·  confirm step and advance\nESC             Cancel the current log, return to idle\n[key]            Apply shortcut  (player / play / rating key)\n\nIn the file list:\n\n↑ / ↓          Navigate between files` },
 ];

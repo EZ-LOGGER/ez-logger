@@ -103,7 +103,7 @@ Intentionally minimal — `TagWindowV2` opens automatically on launch. Items:
 - Status line: `Sport | vs Opponent | Videographer | Phase | Folder` (read-only)
 - `↩ Undo Rename` (⌘Z)
 - `Open Window` — recovery path if window is closed
-- `🔄 Load Roster from BC Website` — dev utility
+- `🔄 Load Roster from School Website` — dev utility
 - `⚙️ Setup Session` — dev utility
 - `Quit`
 
@@ -418,7 +418,7 @@ Do not use space-padding for column alignment — it breaks in proportional font
 
 `~/.bball_renamer_v3_rosters.json` (`ROSTERS_FILE`) is a per-sport cache: `{sport_code: [{"key": ..., "label": ...}]}`. `switch_sport` reads from this cache instantly rather than hitting the network.
 
-`fetch_roster(sport_key)` checks the cache first; if a cache entry exists, it also checks `ROSTERS_META_FILE` for the cached timestamp — if the cache is older than `roster_cache_days` setting, it triggers a fresh scrape. On a cache miss it falls back to scraping the hardcoded URL in `SPORTS[sport_key]["url"]`.
+`fetch_roster(sport_key)` checks the cache first; if a cache entry exists, it also checks `ROSTERS_META_FILE` for the cached timestamp — if the cache is older than `roster_cache_days` setting, it triggers a fresh scrape. On a cache miss it scrapes `{roster_base_url}/sports/{slug}/roster` using the saved `roster_base_url` setting, and returns `[]` if none is set. No school's URL is hardcoded.
 
 `scrape_all_rosters(base_url, progress_cb)` — the main entry point for bulk fetching. Calls `discover_roster_links(base_url)` (scrapes root page for `/sports/*/roster` hrefs, fills gaps with `SLUG_TO_CODE` fallbacks), then parallel-fetches all sports (4 threads via `concurrent.futures`). Returns `{sport_code: [name, ...]}`.
 

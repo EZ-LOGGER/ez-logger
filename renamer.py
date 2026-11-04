@@ -22,7 +22,7 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from datetime import datetime
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 
 CRASH_LOG_DIR  = os.path.expanduser("~/.ezlogger/crashes")
 CRASH_EMAIL_TO = "zachjkeding@gmail.com"
@@ -247,20 +247,20 @@ TEAM_ABBREVS = {
 
 # ── Sport definitions ─────────────────────────────────────────────────────────
 SPORTS = {
-    "MBB":   {"label": "🏀  Men's Basketball",    "code": "MBB",   "emoji": "🏀", "url": "https://bceagles.com/sports/mens-basketball/roster"},
-    "WBB":   {"label": "🏀  Women's Basketball",  "code": "WBB",   "emoji": "🏀", "url": "https://bceagles.com/sports/womens-basketball/roster"},
-    "MHK":   {"label": "🏒  Men's Ice Hockey",    "code": "MHK",   "emoji": "🏒", "url": "https://bceagles.com/sports/mens-ice-hockey/roster"},
-    "WHK":   {"label": "🏒  Women's Ice Hockey",  "code": "WHK",   "emoji": "🏒", "url": "https://bceagles.com/sports/womens-ice-hockey/roster"},
-    "FB":    {"label": "🏈  Football",             "code": "FB",    "emoji": "🏈", "url": "https://bceagles.com/sports/football/roster"},
-    "WLAX":  {"label": "🥍  Women's Lacrosse",    "code": "WLAX",  "emoji": "🥍", "url": "https://bceagles.com/sports/womens-lacrosse/roster"},
-    "BASE":  {"label": "⚾  Baseball",             "code": "BASE",  "emoji": "⚾", "url": "https://bceagles.com/sports/baseball/roster"},
-    "SB":    {"label": "🥎  Softball",             "code": "SB",    "emoji": "🥎", "url": "https://bceagles.com/sports/softball/roster"},
+    "MBB":   {"label": "🏀  Men's Basketball",    "code": "MBB",   "emoji": "🏀"},
+    "WBB":   {"label": "🏀  Women's Basketball",  "code": "WBB",   "emoji": "🏀"},
+    "MHK":   {"label": "🏒  Men's Ice Hockey",    "code": "MHK",   "emoji": "🏒"},
+    "WHK":   {"label": "🏒  Women's Ice Hockey",  "code": "WHK",   "emoji": "🏒"},
+    "FB":    {"label": "🏈  Football",             "code": "FB",    "emoji": "🏈"},
+    "WLAX":  {"label": "🥍  Women's Lacrosse",    "code": "WLAX",  "emoji": "🥍"},
+    "BASE":  {"label": "⚾  Baseball",             "code": "BASE",  "emoji": "⚾"},
+    "SB":    {"label": "🥎  Softball",             "code": "SB",    "emoji": "🥎"},
 }
 SPORT_OPTIONS = list(SPORTS.keys())
 
 DEFAULT_SESSION = {
-    "sport": "MBB", "opponent": "MIAMI",
-    "videographer": "ZK", "phase": "PRE", "folder": "",
+    "sport": "MBB", "opponent": "OPP",
+    "videographer": "VID", "phase": "PRE", "folder": "",
     "naming_presets": DEFAULT_NAMING_PRESETS,
     "active_preset": 0,
     "sport_presets": {},
@@ -271,11 +271,7 @@ DEFAULT_SESSION = {
 }
 
 DEFAULT_SHORTCUTS = {
-    "players": [
-        {"key": "1", "label": "HAND"},
-        {"key": "2", "label": "HASTINGS"},
-        {"key": "3", "label": "SMITH"},
-    ],
+    "players": [],
     "plays": [
         {"key": "1", "label": "LAYUP"},
         {"key": "2", "label": "THREE"},
@@ -810,18 +806,12 @@ def fetch_roster(sport_key, cache_days: int = 7):
                 pass
         else:
             return [sc["label"] for sc in cache[sport_key]]
-    # Cache miss — scrape the hardcoded URL for this sport
-    url = SPORTS[sport_key].get("url", "")
-    if not url:
+    # Cache miss — scrape the user's school website; nothing to fetch until one is set
+    base_url = load_json(SETTINGS_FILE, DEFAULT_SETTINGS).get("roster_base_url", "").strip()
+    slug = next((s for s, c in SLUG_TO_CODE.items() if c == sport_key), None)
+    if not base_url or not slug:
         return []
-    ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": ua})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            html = r.read().decode("utf-8", errors="ignore")
-        return _parse_roster_html(html)
-    except Exception:
-        return []
+    return fetch_roster_from_url(f"{base_url.rstrip('/')}/sports/{slug}/roster")
 
 def roster_to_shortcuts(entries):
     shortcuts = []
@@ -4023,7 +4013,7 @@ class TagWindowV2:
         key_field.setFont_(NSFont.systemFontOfSize_(13))
         panel.addSubview_(key_field)
         name_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 300, 24))
-        name_field.setPlaceholderString_("Player name  (e.g.  HAND,  SMITH)")
+        name_field.setPlaceholderString_("Player name  (e.g.  JONES,  SMITH)")
         name_field.setFont_(NSFont.systemFontOfSize_(13))
         panel.addSubview_(name_field)
         alert.setAccessoryView_(panel)
@@ -4141,7 +4131,7 @@ class TagWindowV2:
         current  = settings.get("roster_base_url", "")
         w = rumps.Window(
             title="Set Roster URL",
-            message="Paste the athletics website base URL\n(e.g. https://bceagles.com)",
+            message="Paste your school's athletics website URL\n(e.g. https://yourschoolathletics.com)",
             default_text=current,
             ok="Save", cancel="Cancel",
             dimensions=(400, 24),
@@ -7353,7 +7343,7 @@ class TagWindowV2:
                 ("table", [
                     ("Sport",        "Select from the dropdown, or use the Team tab sport pill"),
                     ("Opponent",     "Opposing team code (e.g. MIAMI, DUKE, YALE)"),
-                    ("Videographer", "Your initials or operator code (e.g. ZK)"),
+                    ("Videographer", "Your initials or operator code (e.g. AB)"),
                     ("Phase",        "Game phase: PRE · 1H · 2H · OT · POST · PRAC · SCOUT"),
                     ("Folder",       "The folder containing your video files"),
                 ]),
@@ -7393,7 +7383,7 @@ class TagWindowV2:
                 ("subhead", "LOADING A ROSTER"),
                 ("para",
                  "Click 'Fetch All Rosters ↓' to automatically pull current rosters from "
-                 "BC Athletics for all sports. Each athlete becomes a shortcut entry "
+                 "your school's athletics website for all sports. Each athlete becomes a shortcut entry "
                  "with their last name as the label and jersey number shown in the pill."),
                 ("subhead", "MANUAL MANAGEMENT"),
                 ("bullets", [
@@ -7445,9 +7435,9 @@ class TagWindowV2:
                 ]),
                 ("subhead", "SCHEDULE IMPORT"),
                 ("para",
-                 "Click '⚡ Import Schedule' to auto-generate one preset per opponent on BC's "
-                 "schedule. The active preset must have an Opponent field. Existing presets "
-                 "are not overwritten. Set the base domain in Settings."),
+                 "Click '⚡ Import Schedule' to auto-generate one preset per opponent on your "
+                 "team's schedule. The active preset must have an Opponent field. Existing presets "
+                 "are not overwritten. Set your school's website in the Team section."),
             ]),
             ("Batch Rename", [
                 ("para",
@@ -7455,7 +7445,7 @@ class TagWindowV2:
                  "the active naming preset. Run it before logging to establish the base filename."),
                 ("subhead", "DEFAULT FORMAT"),
                 ("para", "SPORT_OPPONENT_YYYYMMDD_HHMMSS_VID_PHASE.ext"),
-                ("para", "Example:   MBB_MIAMI_20260117_143022_ZK_2H.mp4"),
+                ("para", "Example:   MBB_MIAMI_20260117_143022_AB_2H.mp4"),
                 ("para",
                  "Date and time are read from the video file's container metadata via "
                  "AVFoundation, falling back to the file's creation timestamp when metadata "
@@ -7490,7 +7480,7 @@ class TagWindowV2:
                 ("subhead", "ROSTER DOMAIN"),
                 ("para",
                  "Click '🔗 domain.com' in the Team header to set the base URL for roster "
-                 "and schedule scraping (e.g. bceagles.com). Saved to Settings automatically."),
+                 "and schedule scraping (e.g. yourschoolathletics.com). Saved to Settings automatically."),
             ]),
             ("Keyboard Reference", [
                 ("subhead", "LOG MODE"),
@@ -7743,7 +7733,7 @@ class BasketballRenamerApp(rumps.App):
         self.menu.add(rumps.separator)
 
         # ── DEV ──────────────────────────────────────────────────────────────
-        self.menu.add(rumps.MenuItem("🔄  Load Roster from BC Website", callback=self.load_roster))
+        self.menu.add(rumps.MenuItem("🔄  Load Roster from School Website", callback=self.load_roster))
         self.menu.add(rumps.MenuItem("⚙️  Setup Session",               callback=self.setup_session))
         self.menu.add(rumps.separator)
 
@@ -7756,7 +7746,7 @@ class BasketballRenamerApp(rumps.App):
         fields = [
             ("sport",        "Sport Code",           f"Options: {', '.join(SPORT_OPTIONS)}"),
             ("opponent",     "Opponent",              "e.g. MIAMI"),
-            ("videographer", "Videographer Initials", "e.g. ZK"),
+            ("videographer", "Videographer Initials", "e.g. AB"),
             ("phase",        "Game Phase",            f"Options: {', '.join(PHASE_OPTIONS)}"),
         ]
         for key, title, hint in fields:
@@ -7817,14 +7807,11 @@ class BasketballRenamerApp(rumps.App):
         settings = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
         base_url = settings.get("roster_base_url", "").strip()
         if not base_url:
-            # Fall back to single-sport scrape for the active sport
-            sport_key = self.session.get("sport", "MBB")
-            _cd = settings.get("roster_cache_days", 7)
-            rumps.alert("Loading Roster…",
-                        f"Fetching roster for {SPORTS[sport_key]['label']}.\nThis takes a few seconds.")
-            threading.Thread(target=self._load_roster_bg, args=(sport_key, False, _cd), daemon=True).start()
-        else:
-            threading.Thread(target=self._scrape_all_bg, args=(base_url, False), daemon=True).start()
+            rumps.alert("No School Website Set",
+                        "Open the Team section and click the 🔗 button to enter "
+                        "your school's athletics website, then try again.")
+            return
+        threading.Thread(target=self._scrape_all_bg, args=(base_url, False), daemon=True).start()
 
     def load_all_rosters(self, base_url):
         """Called from the Team section UI with a specific base URL."""
@@ -7885,8 +7872,8 @@ class BasketballRenamerApp(rumps.App):
         else:
             if not silent:
                 rumps.alert("❌ Roster Load Failed",
-                            "Could not fetch roster from BC Athletics website.\n"
-                            "Check your internet connection and try again.\n"
+                            "Could not fetch a roster from your school's website.\n"
+                            "Check the URL in the Team section (🔗) and your internet connection.\n"
                             "You can still manage players manually via Manage Players.")
 
     def _refresh_tag_window_players(self):
