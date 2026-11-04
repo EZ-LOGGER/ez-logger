@@ -3875,7 +3875,10 @@ class TagWindowV2:
         for v in list(container.subviews()):
             v.removeFromSuperview()
 
-        items = self.shortcuts.get("players", [])
+        def _key_order(sc):
+            k = sc.get("key", "")
+            return (0, int(k)) if k.isdigit() else (1, k.lower())
+        items = sorted(self.shortcuts.get("players", []), key=_key_order)
         sv    = self._players_scrollview
         cw    = sv.frame().size.width
         if cw < 1:
