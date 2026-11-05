@@ -86,6 +86,7 @@ All application logic lives in a single file: **`renamer.py`** (~8 400 lines).
 | `~/.bball_renamer_v3_key_presets.json` (`KEY_PRESETS_FILE`) | Named hotkey layouts per sport: `{sport_key: [{"name": str, "keys": {label: key}}, ...]}` — saved/loaded via 🔑 Keys ▾ button in Team header |
 | `~/Library/LaunchAgents/com.bball.renamer.plist` | LaunchAgent for login-item support — written/removed by `_set_launch_at_login(on)` |
 | `~/.ezlogger/rename_log.json` | Append-only permanent log of every rename (success + failures) |
+| `~/.ezlogger/tag_records.json` (`TAG_RECORDS_FILE`) | `{tagged_filename: {"base": str, "colors": [str]}}` — the name before labels were added and the Finder colors the app applied, so relabeling replaces old labels. Clips tagged before this file existed have no record and keep their whole name as the base |
 
 ### Key classes (with approximate line offsets in `renamer.py`)
 
@@ -194,6 +195,16 @@ Key flow: `handle_key()` → `_handle_shortcut_key_v2()` → (user presses ENTER
 
 **TAB advances to the next file** — only when `self.step is None` (not mid-tag). Clamps at the last file, no wrap.
 
+**Relabeling** — `_finalize_v2` builds names from `tag_base_stem(stem, record)`, using the base saved in `TAG_RECORDS_FILE`, so a new tag replaces earlier labels. Never derive the base by counting filename segments; naming conventions vary in length.
+
+**Search is player-step only** — `handle_key` only enters search mode when `self.step == "players"`. On every other step, letter and number keys go straight to that step's shortcuts.
+
+**Search results list** — `SearchResultsTable` picks a name in its own `mouseDown_`, not on a selection change, because the top match is already highlighted. It refuses first responder so keys keep reaching the file list.
+
+**Clickable pills** — Log-section pills are `PillButton`s wired to `_on_shortcut_pill_click(bank, sc)`, which does the same thing as pressing the key. Clicking a player pill with no step active arms logging first.
+
+**Finder colors** — a shortcut may hold `"finder_color"` (one of `FINDER_COLORS`), set from the pencil dialog in Labels; a branch child without its own color uses its parent's. Player and custom-text labels never set a color. `_finalize_v2` applies colors after the rename via `finder_colors_for_tags` + `merged_finder_tags` + `set_finder_tags`; non-color tags are always kept, and a color failure never undoes the rename. Tag undo entries store `tags_before` so `undo_last` can restore them.
+
 `_finalize_v2` calls `log_stat` once **per chain segment**, splitting `_tag_parts` at `_chain_boundary_indices`. Within each segment, custom-text entries (in `_custom_indices`) are excluded. Positional mapping per segment: player = `[0]`, rating = `[-1]`, play = middle parts joined. This ensures every player in a multi-action clip is credited individually in stats.
 
 ### Branching label trees
@@ -240,7 +251,7 @@ All `pyobjc` subclasses are defined inside `make_objc_classes()`, called lazily 
 
 **`PillButton`** has a `hitTest_` override that always returns `self` for any click within its bounds, preventing NSTextField subviews from swallowing mouse events. Always use `objc.super(_PillButton, self)` (not bare `super()`) for super calls inside pyobjc ObjC method bodies. Use `PillButton` (not `NSView`) any time you need `setClickHandler_` — plain `NSView` does not have that method.
 
-**Dropdown menus** use `NSMenu` + `MenuTarget` (a thin `NSObject` with a `_callback` slot) — not `NSPopUpButton`. For `NSButton` target/action, use the same `MenuTarget` pattern: set `btn.setTarget_(t)` and `btn.setAction_("menuPicked:")`. Always keep `MenuTarget` instances alive by appending to a list on `self` (e.g. `self._toc_targets`, `self._btn_targets`) — ObjC won't retain them.
+**Dropdown menus** use `NSMenu` + `MenuTarget` (a thin `NSObject` with a `_callback` slot) — not `NSPopUpButton`. The exception is the Finder color choice in the Edit Shortcut alert, a native `NSPopUpButton` read when Save is pressed. For `NSButton` target/action, use the same `MenuTarget` pattern: set `btn.setTarget_(t)` and `btn.setAction_("menuPicked:")`. Always keep `MenuTarget` instances alive by appending to a list on `self` (e.g. `self._toc_targets`, `self._btn_targets`) — ObjC won't retain them.
 
 **Do not use `NSSegmentedControl` for tab switching.** Its visual selection state does not update reliably when wired through `MenuTarget`. Use two `ActionButton` instances and swap their colors manually via `configureTitle_bg_press_action_` — see `_switch_stats_tab` as the reference pattern.
 
@@ -262,7 +273,9 @@ All `pyobjc` subclasses are defined inside `make_objc_classes()`, called lazily 
 
 Step circles in the now-tagging card vertically center themselves using `_step_circles_card_h` (set by `_reposition_now_card_internals`). Circles rebuild when card dimensions change by more than 6px (tracked via `_last_step_circles_w` / `_last_step_circles_h`).
 
-The Naming section layout: header (64px) → folder row (54px) → `_convention_sv` fills remaining height. `_reposition_session_section(cw, ch)` handles this split.
+The Naming section layout: header (64px) → folder row (54px) → `_convention_sv` fills remaining height, with the Clips panel (280px) on the right. `_reposition_session_section(cw, ch)` handles this split. The panel hides, and its selection clears, when content width is below `NAMING_CLIPS_MIN_W`.
+
+**Clip selection for Batch Rename** — the Clips panel is a multi-select `NSTableView` driven by `NamingClipsDelegate`. `_naming_selected` holds the chosen filenames, `_refresh_naming_clips()` (called from `_refresh_files`) drops names that no longer exist, and `_update_naming_selection_ui()` updates the status text and the `Batch Rename (N)` button. `_on_batch_rename` passes the set to `batch_rename(_, only_names=...)`; an empty selection renames the whole folder.
 
 **Instance variables for live resize:**
 - `self._settings_doc` — reference to the settings `NSScrollView` document view; set in `_build_settings_section`. Needed by `_reposition_settings_section` to update doc width live (rows have `autoresizingMask=2` and auto-stretch once the doc is the right width).
@@ -340,7 +353,7 @@ Step circles container lives in `self._now_card`. `self._step_circles_left_w` st
 
 ### Shortcut cards in Log section
 
-`_build_shortcut_cards()` loops over `self._steps` (not the legacy `bank_titles` list). One card per step, all stacked at the same position with alpha 0/1. `_sc_cv`, `_sc_cx`, `_sc_cy` are stored so `_rebuild_sc_cards()` can recreate cards after steps change without rebuilding the whole window.
+`_build_shortcut_cards()` loops over `self._steps` (not the legacy `bank_titles` list). One card per step, all stacked at the same position. Inactive cards must be hidden as well as alpha 0, because a transparent view still receives clicks; `_set_cards_for_step` owns this. `_sc_cv`, `_sc_cx`, `_sc_cy` are stored so `_rebuild_sc_cards()` can recreate cards after steps change without rebuilding the whole window.
 
 `_rebuild_sc_cards()` — removes existing card views, recreates from current `self._steps`. Resets `_sc_current_bank = "players"`.
 

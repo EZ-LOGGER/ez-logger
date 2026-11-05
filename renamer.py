@@ -22,7 +22,7 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from datetime import datetime
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 
 CRASH_LOG_DIR  = os.path.expanduser("~/.ezlogger/crashes")
 CRASH_EMAIL_TO = "zachjkeding@gmail.com"
@@ -107,6 +107,7 @@ UNDO_FILE      = os.path.expanduser("~/.bball_renamer_undo.json")
 ROSTERS_FILE   = os.path.expanduser("~/.bball_renamer_v3_rosters.json")
 STATS_FILE     = os.path.expanduser("~/.bball_renamer_v3_stats.json")
 RENAME_LOG_FILE  = os.path.expanduser("~/.ezlogger/rename_log.json")
+TAG_RECORDS_FILE = os.path.expanduser("~/.ezlogger/tag_records.json")
 KEY_PRESETS_FILE = os.path.expanduser("~/.bball_renamer_v3_key_presets.json")
 
 DEFAULT_SETTINGS = {
@@ -825,6 +826,100 @@ def roster_to_shortcuts(entries):
         shortcuts.append({"key": key, "label": label, "number": number})
     return shortcuts
 
+def tag_base_stem(stem, record):
+    """Return the name to build labels onto, dropping labels from an earlier tag.
+    Uses the base saved when the clip was tagged; a clip with no saved base keeps its name."""
+    base = (record or {}).get("base")
+    if base and (stem == base or stem.startswith(f"{base}_")):
+        return base
+    return stem.rstrip("_")
+
+
+def save_tag_records(records):
+    """Save the tagged-clip records. The rename already happened, so a failure here must not raise."""
+    try:
+        os.makedirs(os.path.dirname(TAG_RECORDS_FILE), exist_ok=True)
+        save_json(TAG_RECORDS_FILE, records)
+    except Exception:
+        pass
+
+
+def batch_base_stem(name, was_deduped):
+    """Return a planned name's stem without the _2, _3 suffix batch rename may have added."""
+    stem = os.path.splitext(name)[0]
+    if was_deduped:
+        stem = re.sub(r"_\d+$", "", stem)
+    return stem.rstrip("_")
+
+
+def select_batch_files(files, only_names=None):
+    """Limit a batch rename to the selected clip names; no selection means every file."""
+    if not only_names:
+        return list(files)
+    return [f for f in files if f.name in only_names]
+
+
+# ── Finder color labels ───────────────────────────────────────────────────────
+FINDER_COLOR_HEX = {
+    "Red": "#ff5f57", "Orange": "#ff9f0a", "Yellow": "#ffd60a", "Green": "#32d74b",
+    "Blue": "#0a84ff", "Purple": "#bf5af2", "Gray": "#98989d",
+}
+FINDER_COLORS = list(FINDER_COLOR_HEX)
+
+
+def finder_colors_for_tags(tag_parts, custom_indices, shortcuts, steps):
+    """Return the Finder colors for a clip's labels, in the order they were applied.
+    Player names and custom text never set a color; a branch child without its
+    own color uses its parent's."""
+    by_label = {}
+    for bank in steps:
+        if bank == "players":
+            continue
+        for sc in shortcuts.get(bank, []):
+            color = sc.get("finder_color")
+            if color:
+                by_label[sc["label"].replace(" ", "_")] = color
+            for child in sc.get("children", []):
+                child_color = child.get("finder_color") or color
+                if child_color:
+                    by_label[child["label"].replace(" ", "_")] = child_color
+    colors = []
+    for i, part in enumerate(tag_parts):
+        color = by_label.get(part)
+        if color and i not in custom_indices and color not in colors:
+            colors.append(color)
+    return colors
+
+
+def merged_finder_tags(existing, new_colors, previous_colors):
+    """Work out a clip's Finder tags. Tags that are not colors are always kept.
+    With no new colors, only colors the app applied earlier are removed, so a
+    color the user set by hand in Finder stays."""
+    if new_colors:
+        return [t for t in existing if t not in FINDER_COLORS] + list(new_colors)
+    return [t for t in existing if t not in previous_colors]
+
+
+def get_finder_tags(path):
+    try:
+        from Foundation import NSURL, NSURLTagNamesKey
+        url = NSURL.fileURLWithPath_(str(path))
+        ok, tags, _err = url.getResourceValue_forKey_error_(None, NSURLTagNamesKey, None)
+        return [str(t) for t in tags] if ok and tags else []
+    except Exception:
+        return []
+
+
+def set_finder_tags(path, tags):
+    try:
+        from Foundation import NSURL, NSURLTagNamesKey
+        url = NSURL.fileURLWithPath_(str(path))
+        ok, _err = url.setResourceValue_forKey_error_(list(tags), NSURLTagNamesKey, None)
+        return bool(ok)
+    except Exception:
+        return False
+
+
 def log_stat(session, player, play, rating):
     """Append one tagged-clip event to STATS_FILE."""
     _now = datetime.now()
@@ -929,15 +1024,17 @@ PillButton    = None
 MenuTarget    = None
 MainCaller    = None
 FileListDelegate     = None
+NamingClipsDelegate  = None
 QLDataSource         = None
 SearchResultsDelegate = None
+SearchResultsTable = None
 WindowDelegate       = None
 FilePanelResizer     = None
 NowCardResizer       = None
 CardHeightResizer    = None
 
 def make_objc_classes():
-    global _classes_made, KeyTableView, NavItemView, ActionButton, PillButton, MenuTarget, MainCaller, FileListDelegate, QLDataSource, SearchResultsDelegate, WindowDelegate, FilePanelResizer, NowCardResizer, CardHeightResizer
+    global _classes_made, KeyTableView, NavItemView, ActionButton, PillButton, MenuTarget, MainCaller, FileListDelegate, NamingClipsDelegate, QLDataSource, SearchResultsDelegate, SearchResultsTable, WindowDelegate, FilePanelResizer, NowCardResizer, CardHeightResizer
     if _classes_made:
         return
     _classes_made = True
@@ -1146,9 +1243,29 @@ def make_objc_classes():
 
     FileListDelegate = _FileListDelegate
 
-    class _SearchResultsDelegate(NSObject):
+    class _NamingClipsDelegate(NSObject):
         owner       = None
         _suppressed = False
+
+        def numberOfRowsInTableView_(self, tv):
+            return len(self.owner._files) if self.owner else 0
+
+        def tableView_objectValueForTableColumn_row_(self, tv, col, row):
+            if self.owner and row < len(self.owner._files):
+                return self.owner._files[row].name
+            return ""
+
+        def tableView_willDisplayCell_forTableColumn_row_(self, tv, cell, col, row):
+            cell.setLineBreakMode_(3)  # truncate the head so the end of the name stays visible
+
+        def tableViewSelectionDidChange_(self, notif):
+            if self.owner and not self._suppressed:
+                self.owner._on_naming_selection_changed()
+
+    NamingClipsDelegate = _NamingClipsDelegate
+
+    class _SearchResultsDelegate(NSObject):
+        owner = None
 
         def numberOfRowsInTableView_(self, tv):
             if not self.owner:
@@ -1166,16 +1283,22 @@ def make_objc_classes():
         def tableView_willDisplayCell_forTableColumn_row_(self, tv, cell, col, row):
             cell.setTextColor_(NSColor.whiteColor())
 
-        def tableViewSelectionDidChange_(self, notif):
-            if not self.owner or self._suppressed:
-                return
-            row = notif.object().selectedRow()
-            if row < 0 or row >= len(self.owner._search_matches):
-                return
-            self.owner._search_idx = row
-            self.owner._confirm_search_selection()
-
     SearchResultsDelegate = _SearchResultsDelegate
+
+    class _SearchResultsTable(NSTableView):
+        owner = None
+
+        def mouseDown_(self, event):
+            # Picks on the click itself, not on a selection change: the top match
+            # is already highlighted, so clicking it would not change the selection.
+            point = self.convertPoint_fromView_(event.locationInWindow(), None)
+            row   = self.rowAtPoint_(point)
+            owner = self.owner
+            if owner and 0 <= row < len(owner._search_matches):
+                owner._search_idx = row
+                owner._confirm_search_selection()
+
+    SearchResultsTable = _SearchResultsTable
 
     # Load QuickLookUI so QLPreviewPanel is available
     try:
@@ -1448,6 +1571,7 @@ class TagWindowV2:
         self._chain_btns             = {}    # {bank: PillButton} for "+ Player (+)" buttons
         # Search-mode state
         self._search_enabled     = False   # toggled by top-bar switch
+        self._naming_selected    = set()   # clip names chosen in the Naming tab for Batch Rename
         self._search_mode        = False
         self._search_text        = ""
         self._search_matches     = []
@@ -1543,6 +1667,8 @@ class TagWindowV2:
 
             self._now_step_circles.append((c, num_lbl))
             self._now_step_labels.append(step_lbl)
+
+        self._raise_search_panel()
 
     def _build_window(self):
         make_objc_classes()
@@ -1961,6 +2087,11 @@ class TagWindowV2:
 
         if is_tag and hasattr(self, "_session_status_btn"):
             self._update_session_status_btn()
+        if is_tag and hasattr(self, "_file_list_table"):
+            # Logging keys only reach the app while the Log file list has focus
+            self.win.makeFirstResponder_(self._file_list_table)
+        if is_session:
+            self._refresh_files()
         if hasattr(self, "_now_card"):
             self._now_card.setHidden_(not is_tag)
         if hasattr(self, "_now_card_h_resizer"):
@@ -2047,7 +2178,7 @@ class TagWindowV2:
             if alert.runModal() == 1000:  # first button
                 self._on_nav_select("session")
             return
-        self.app.batch_rename(None)
+        self.app.batch_rename(None, only_names=set(self._naming_selected) or None)
 
     def _on_session_status_btn(self):
         self._on_nav_select("session")
@@ -2222,10 +2353,13 @@ class TagWindowV2:
         sr_scroll.layer().setBorderWidth_(0.5)
         sr_scroll.layer().setBorderColor_(
             _hex_color_alpha("#ffffff", 0.18).CGColor())
+        sr_scroll.setBackgroundColor_(_hex_color("#1e1e20"))
+        sr_scroll.setDrawsBackground_(True)
         sr_scroll.setHidden_(True)
 
-        sr_table = NSTableView.alloc().initWithFrame_(
+        sr_table = SearchResultsTable.alloc().initWithFrame_(
             NSMakeRect(0, 0, SR_W, SR_H))
+        sr_table.owner = self
         sr_table.setRowHeight_(18.0)
         sr_table.setHeaderView_(None)
         sr_table.setGridStyleMask_(0)
@@ -2241,6 +2375,7 @@ class TagWindowV2:
         sr_delegate.owner = self
         sr_table.setDataSource_(sr_delegate)
         sr_table.setDelegate_(sr_delegate)
+        sr_table.setRefusesFirstResponder_(True)  # keys must keep reaching the file list
 
         sr_scroll.setDocumentView_(sr_table)
         card.addSubview_(sr_scroll)
@@ -2415,6 +2550,7 @@ class TagWindowV2:
             card.setAutoresizingMask_(8)  # minY only — x-position managed by _reposition_layout
             # Stack all cards at the same position; only current bank is opaque
             card.setAlphaValue_(1.0 if bank == "players" else 0.0)
+            card.setHidden_(bank != "players")  # transparent views still take clicks
             cv.addSubview_(card)
             self._sc_cards[bank] = card
 
@@ -2490,6 +2626,7 @@ class TagWindowV2:
                 _hex_color_alpha("#ffffff", 0.08).CGColor())
             card.setAutoresizingMask_(8)
             card.setAlphaValue_(1.0 if bank == "players" else 0.0)
+            card.setHidden_(bank != "players")  # transparent views still take clicks
             cv.addSubview_(card)
             self._sc_cards[bank] = card
 
@@ -2658,7 +2795,9 @@ class TagWindowV2:
                            if s["key"].lower() == key.lower()), None)
                 in_branch = self._branch_items is not None
                 digit_search = key.isdigit() and self._player_number_search
-                if len(key) == 1 and (key.isalpha() or digit_search) and self._search_enabled and not in_branch:
+                if (self.step == "players" and len(key) == 1
+                        and (key.isalpha() or digit_search)
+                        and self._search_enabled and not in_branch):
                     self._enter_search_mode(key)
                 elif sc is not None:
                     self._handle_shortcut_key_v2(sc)
@@ -2676,6 +2815,21 @@ class TagWindowV2:
         self._set_v2_hint(
             f"⚡ {step_lbl}  —  ✔ {label}  ·  press another key or ENTER to advance"
         )
+
+    def _on_shortcut_pill_click(self, bank, sc):
+        """Clicking a Log-section pill does the same thing as pressing its key."""
+        if self._custom_mode:
+            return
+        if self.step is None:
+            if bank != "players" or self._selected_file_idx < 0 or not self._files:
+                return
+            self._reset_tag_state()
+            self._start_player_step()
+        if self.step != bank:
+            return
+        if self._search_mode:
+            self._exit_search_mode()
+        self._handle_shortcut_key_v2(sc)
 
     def handle_cmd_z(self):
         if self.app:
@@ -2850,8 +3004,16 @@ class TagWindowV2:
 
     # ── Search / autocomplete ─────────────────────────────────────────────────
 
+    def _raise_search_panel(self):
+        """Keep the dropdown above the step circles, which get rebuilt after it."""
+        from AppKit import NSWindowAbove
+        panel = getattr(self, "_search_results_scroll", None)
+        if panel is not None and panel.superview() is not None:
+            panel.superview().addSubview_positioned_relativeTo_(panel, NSWindowAbove, None)
+
     def _show_search_panel(self):
         if hasattr(self, "_search_results_scroll"):
+            self._raise_search_panel()
             self._search_results_scroll.setHidden_(False)
 
     def _hide_search_panel(self):
@@ -2862,9 +3024,7 @@ class TagWindowV2:
         if not hasattr(self, "_search_results_table"):
             return
         from AppKit import NSIndexSet
-        tv       = self._search_results_table
-        delegate = self._search_results_delegate
-        delegate._suppressed = True
+        tv = self._search_results_table
         tv.reloadData()
         if self._search_matches:
             idx_set = NSIndexSet.indexSetWithIndex_(self._search_idx)
@@ -2872,7 +3032,6 @@ class TagWindowV2:
             tv.scrollRowToVisible_(self._search_idx)
         else:
             tv.deselectAll_(None)
-        delegate._suppressed = False
 
     def _confirm_search_selection(self):
         if not self._search_matches:
@@ -3003,8 +3162,7 @@ class TagWindowV2:
         self.step          = self._steps[next_idx]
         title, hint        = self._step_label(self.step)
         self._custom_input = ""
-        search_note = "  ·  ⌨ type to search" if self._search_enabled else ""
-        self._set_v2_hint(f"⚡ {title}  —  {hint}{search_note}")
+        self._set_v2_hint(f"⚡ {title}  —  {hint}")
         self._now_tag_preview.setStringValue_("_".join(self._tag_parts) or "—")
         self._set_step_state(active=next_idx, completed=tuple(range(next_idx)))
 
@@ -3016,10 +3174,9 @@ class TagWindowV2:
         close_quicklook()
 
         tag_str  = "_".join(self._tag_parts)
-        stem     = f.stem
-        seg      = stem.split("_")
-        base     = "_".join(seg[:6]) if len(seg) >= 6 else stem
-        base     = base.rstrip("_")
+        records  = load_json(TAG_RECORDS_FILE, {})
+        record   = records.get(f.name)
+        base     = tag_base_stem(f.stem, record)
         new_name = f"{base}_{tag_str}{f.suffix}" if tag_str else f"{base}{f.suffix}"
         new_path = f.parent / new_name
 
@@ -3058,12 +3215,32 @@ class TagWindowV2:
             self._set_v2_hint(f"❌  {err}")
             self.step = None
             return
+
+        # Finder colors follow this clip's labels; a problem here never undoes the rename
+        colors = finder_colors_for_tags(
+            self._tag_parts, self._custom_indices, self.shortcuts, self._steps)
+        previous_colors = (record or {}).get("colors", [])
+        tags_before = get_finder_tags(new_path)
+        tags_after  = merged_finder_tags(tags_before, colors, previous_colors)
+        color_failed = (tags_after != tags_before
+                        and not set_finder_tags(new_path, tags_after))
+
+        records.pop(old_name, None)
+        if tag_str:
+            records[new_name] = {"base": base, "colors": [] if color_failed else colors}
+        save_tag_records(records)
+
         if self.app:
+            undo_entry = {"old": old_name, "new": new_name}
+            if record:
+                undo_entry["record_before"] = record
+            if tags_after != tags_before and not color_failed:
+                undo_entry["tags_before"] = tags_before
             self.app._push_undo({
                 "type": "tag",
                 "folder": str(f.parent),
                 "timestamp": datetime.now().isoformat(),
-                "renames": [{"old": old_name, "new": new_name}],
+                "renames": [undo_entry],
             }, max_stack=self._settings.get("undo_stack_size", 50))
             # Log stat — split at chain boundaries, hotkey parts only per segment
             boundaries = sorted(self._chain_boundary_indices)
@@ -3082,7 +3259,8 @@ class TagWindowV2:
                         seg[-1]             if len(seg) >= 2 else "",
                     )
 
-        self._now_tag_preview.setStringValue_(f"✓  {new_name}")
+        color_note = "  (Finder color could not be set)" if color_failed else ""
+        self._now_tag_preview.setStringValue_(f"✓  {new_name}{color_note}")
         self._set_v2_hint("↵  ENTER to log this file  ·  SPACE to preview  ·  TAB for next")
 
         self._reset_tag_state()
@@ -3267,6 +3445,7 @@ class TagWindowV2:
                 no_folder = not self.folder or not self.folder.is_dir()
                 self._empty_state_msg.setStringValue_(
                     "No folder selected" if no_folder else "No video files found")
+        self._refresh_naming_clips()
 
     def _on_file_selected(self, row):
         self._selected_file_idx = row
@@ -3354,6 +3533,17 @@ class TagWindowV2:
             self._now_thumb_img.setHidden_(False)
         if hasattr(self, "_now_thumb_icon"):
             self._now_thumb_icon.setHidden_(True)
+
+    def _add_finder_color_dot(self, parent, x, y, color):
+        """Draw a small dot showing the Finder color assigned to a shortcut."""
+        if color not in FINDER_COLOR_HEX:
+            return
+        from AppKit import NSView, NSMakeRect
+        dot = NSView.alloc().initWithFrame_(NSMakeRect(x, y, 9, 9))
+        dot.setWantsLayer_(True)
+        dot.layer().setCornerRadius_(4.5)
+        dot.layer().setBackgroundColor_(_hex_color(FINDER_COLOR_HEX[color]).CGColor())
+        parent.addSubview_(dot)
 
     def _populate_shortcut_pills(self, bank):
         from AppKit import NSView, NSTextField, NSFont, NSColor, NSMakeRect
@@ -3470,8 +3660,9 @@ class TagWindowV2:
             x   = col * (col_w + COL_GAP)
             y   = content_h - (row + 1) * PILL_H - row * ROW_GAP
 
-            pill = NSView.alloc().initWithFrame_(NSMakeRect(x, y, col_w, PILL_H))
-            pill.setWantsLayer_(True)
+            pill = PillButton.alloc().initWithFrame_(NSMakeRect(x, y, col_w, PILL_H))
+            pill.setClickHandler_(
+                lambda v, e, b=bank, s=sc: self._on_shortcut_pill_click(b, s))
             pill.layer().setCornerRadius_(7.0)
             pill.layer().setBackgroundColor_(
                 _hex_color_alpha("#ffffff", 0.05).CGColor())
@@ -3500,6 +3691,8 @@ class TagWindowV2:
                 (20 - kf.size.height) / 2,
                 kf.size.width, kf.size.height))
             key_bg.addSubview_(key_lbl)
+            self._add_finder_color_dot(
+                pill, 8 + 22 - 6, (PILL_H + 20) / 2 - 6, sc.get("finder_color"))
 
             lbl = NSTextField.labelWithString_(sc["label"])
             lbl.setFont_(_font)
@@ -3561,15 +3754,17 @@ class TagWindowV2:
                     NSColor.secondaryLabelColor())
 
     def _set_cards_for_step(self, active_bank):
-        """Show one card at a time, cross-fading between steps.
+        """Show one card at a time, fading the new one in.
         active_bank=None → restore current card visibility (no animation).
-        active_bank='players'|'plays'|'ratings' → fade out old, fade in new."""
+        active_bank='players'|'plays'|'ratings' → hide old, fade in new.
+        Inactive cards must be hidden, not just transparent: they are stacked
+        in the same spot and a view with alpha 0 still receives clicks."""
         from AppKit import NSAnimationContext
 
         if active_bank is None:
             # Returning to tag section from another nav item — restore alphas
             for bank, card in self._sc_cards.items():
-                card.setHidden_(False)
+                card.setHidden_(bank != self._sc_current_bank)
                 card.setAlphaValue_(1.0 if bank == self._sc_current_bank else 0.0)
             return
 
@@ -3582,10 +3777,15 @@ class TagWindowV2:
         # Reflow the incoming card for the current window width before showing it
         self._populate_shortcut_pills(active_bank)
 
+        old_card = self._sc_cards[old_bank]
+        old_card.setAlphaValue_(0.0)
+        old_card.setHidden_(True)
+        new_card = self._sc_cards[active_bank]
+        new_card.setAlphaValue_(0.0)
+        new_card.setHidden_(False)
         NSAnimationContext.beginGrouping()
         NSAnimationContext.currentContext().setDuration_(0.25)
-        self._sc_cards[old_bank].animator().setAlphaValue_(0.0)
-        self._sc_cards[active_bank].animator().setAlphaValue_(1.0)
+        new_card.animator().setAlphaValue_(1.0)
         NSAnimationContext.endGrouping()
 
     def _set_step_state(self, active=-1, completed=()):
@@ -4853,6 +5053,8 @@ class TagWindowV2:
                 (BADGE - kf.size.height) / 2,
                 kf.size.width, kf.size.height))
             key_bg.addSubview_(key_lbl)
+            self._add_finder_color_dot(
+                pill, 12 + BADGE - 6, (PILL_H + BADGE) / 2 - 6, sc.get("finder_color"))
 
             name_lbl = NSTextField.labelWithString_(sc["label"])
             name_lbl.setFont_(NSFont.systemFontOfSize_(font_size))
@@ -4931,7 +5133,7 @@ class TagWindowV2:
                 self._populate_shortcut_pills(step_id)
 
     def _labels_edit_shortcut(self, idx):
-        from AppKit import NSAlert, NSTextField, NSView, NSMakeRect, NSFont
+        from AppKit import NSAlert, NSTextField, NSView, NSMakeRect, NSFont, NSPopUpButton
         step_id = getattr(self, "_labels_active_step", None)
         if step_id is None:
             return
@@ -4946,22 +5148,38 @@ class TagWindowV2:
         alert.addButtonWithTitle_("Save")
         alert.addButtonWithTitle_("Cancel")
 
-        panel = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 300, 60))
-        key_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 32, 300, 24))
+        panel = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 300, 94))
+        key_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 66, 300, 24))
         key_field.setStringValue_(sc["key"])
         key_field.setFont_(NSFont.systemFontOfSize_(13))
         panel.addSubview_(key_field)
-        name_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 300, 24))
+        name_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 34, 300, 24))
         name_field.setStringValue_(sc["label"])
         name_field.setFont_(NSFont.systemFontOfSize_(13))
         panel.addSubview_(name_field)
+
+        color_caption = NSTextField.labelWithString_("Finder color")
+        color_caption.setFont_(NSFont.systemFontOfSize_(12))
+        color_caption.setFrame_(NSMakeRect(0, 4, 90, 18))
+        panel.addSubview_(color_caption)
+        color_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(96, 0, 204, 26), False)
+        color_popup.addItemsWithTitles_(["None"] + FINDER_COLORS)
+        color_popup.selectItemWithTitle_(sc.get("finder_color") or "None")
+        panel.addSubview_(color_popup)
         alert.setAccessoryView_(panel)
 
         if alert.runModal() == 1000:
             key   = key_field.stringValue().strip()[:1]
             label = _asc(name_field.stringValue().strip()).upper()
             if key and label:
-                items[idx] = {"key": key, "label": label}
+                updated = {**sc, "key": key, "label": label}  # keeps children and number
+                color = color_popup.titleOfSelectedItem()
+                if color != "None":
+                    updated["finder_color"] = color
+                else:
+                    updated.pop("finder_color", None)
+                items[idx] = updated
                 items.sort(key=lambda sc: (0, int(sc["key"])) if sc.get("key", "").isdigit() else (1, sc.get("key", "").lower()))
                 self.shortcuts[step_id] = items
                 self.app._save_shortcuts()
@@ -5236,9 +5454,9 @@ class TagWindowV2:
         self._build_step_circles()
         self._set_step_state(active=-1)
         if hasattr(self, "_sc_cards"):
-            for card in self._sc_cards.values():
-                sec = getattr(self, "current_section", "tag")
-                card.setHidden_(sec != "tag")
+            sec = getattr(self, "current_section", "tag")
+            for bank, card in self._sc_cards.items():
+                card.setHidden_(sec != "tag" or bank != self._sc_current_bank)
 
     # ── Naming section ────────────────────────────────────────────────────────
 
@@ -5282,8 +5500,9 @@ class TagWindowV2:
         section.addSubview_(sep)
 
         # ── Folder row ────────────────────────────────────────────────────────
-        FORM_W  = min(560.0, cw - 80.0)
-        form_x  = (cw - FORM_W) / 2
+        layout_w = self._naming_form_area_w(cw)
+        FORM_W  = min(560.0, layout_w - 80.0)
+        form_x  = (layout_w - FORM_W) / 2
         folder_row_y = header_y - FOLDER_H - 12.0
 
         s = self.app.session if self.app else DEFAULT_SESSION
@@ -5341,8 +5560,140 @@ class TagWindowV2:
         section.addSubview_(conv_sv)
         self._convention_sv = conv_sv
 
-        self._build_convention_ui(section, cw)
+        self._build_convention_ui(section, layout_w)
+        self._build_naming_clips_panel(section, cw, ch)
         self._reposition_session_section(cw, ch)
+
+    # ── Naming section — clip selection for Batch Rename ─────────────────────
+
+    NAMING_CLIPS_W     = 280.0
+    NAMING_CLIPS_MIN_W = 860.0   # below this content width the panel hides
+
+    def _naming_form_area_w(self, cw):
+        """Width left for the folder row and convention builder beside the clip panel."""
+        if cw < self.NAMING_CLIPS_MIN_W:
+            return cw
+        return cw - self.NAMING_CLIPS_W - 24.0
+
+    def _build_naming_clips_panel(self, section, cw, ch):
+        from AppKit import (
+            NSView, NSScrollView, NSTableColumn, NSTableView,
+            NSTextField, NSFont, NSColor, NSMakeRect,
+        )
+        PANEL_W = self.NAMING_CLIPS_W
+        panel_h = max(200.0, ch - 64.0 - 24.0)
+
+        panel = NSView.alloc().initWithFrame_(
+            NSMakeRect(cw - PANEL_W - 12.0, 12.0, PANEL_W, panel_h))
+        panel.setWantsLayer_(True)
+        panel.layer().setCornerRadius_(8.0)
+        panel.layer().setBackgroundColor_(_hex_color("#252528").CGColor())
+        panel.layer().setBorderWidth_(0.5)
+        panel.layer().setBorderColor_(_hex_color_alpha("#ffffff", 0.08).CGColor())
+        section.addSubview_(panel)
+        self._naming_clips_panel = panel
+
+        title = NSTextField.labelWithString_("CLIPS")
+        title.setFont_(NSFont.boldSystemFontOfSize_(13))
+        title.setTextColor_(_hex_color(COLOR_TAN))
+        title.setFrame_(NSMakeRect(14, panel_h - 28, PANEL_W - 28, 18))
+        title.setAutoresizingMask_(8)
+        panel.addSubview_(title)
+
+        status = NSTextField.wrappingLabelWithString_("")
+        status.setFont_(NSFont.systemFontOfSize_(11))
+        status.setTextColor_(NSColor.secondaryLabelColor())
+        status.setFrame_(NSMakeRect(14, panel_h - 66, PANEL_W - 28, 34))
+        status.setAutoresizingMask_(8)
+        panel.addSubview_(status)
+        self._naming_clips_status = status
+
+        CLEAR_H = 26.0
+        clear_btn = ActionButton.alloc().initWithFrame_(
+            NSMakeRect(14, 10, PANEL_W - 28, CLEAR_H))
+        clear_btn.configureTitle_bg_press_action_(
+            "Clear Selection", "#3a3a3c", "#2c2c2e", self._naming_clear_selection)
+        panel.addSubview_(clear_btn)
+        self._naming_clear_btn = clear_btn
+
+        scroll_y = 10 + CLEAR_H + 8
+        scroll_h = panel_h - 72 - scroll_y
+        scroll = NSScrollView.alloc().initWithFrame_(
+            NSMakeRect(0, scroll_y, PANEL_W, scroll_h))
+        scroll.setHasVerticalScroller_(True)
+        scroll.setAutohidesScrollers_(True)
+        scroll.setDrawsBackground_(False)
+        scroll.setAutoresizingMask_(16)
+        panel.addSubview_(scroll)
+
+        table = NSTableView.alloc().initWithFrame_(NSMakeRect(0, 0, PANEL_W, scroll_h))
+        table.setBackgroundColor_(_hex_color("#252528"))
+        table.setRowHeight_(26)
+        table.setGridStyleMask_(0)
+        table.setSelectionHighlightStyle_(1)
+        table.setHeaderView_(None)
+        table.setAllowsMultipleSelection_(True)
+        table.setAllowsEmptySelection_(True)
+
+        col = NSTableColumn.alloc().initWithIdentifier_("name")
+        col.setWidth_(PANEL_W - 20)
+        col.setEditable_(False)
+        table.addTableColumn_(col)
+        scroll.setDocumentView_(table)
+
+        self._naming_clips_delegate = NamingClipsDelegate.alloc().init()
+        self._naming_clips_delegate.owner = self
+        table.setDataSource_(self._naming_clips_delegate)
+        table.setDelegate_(self._naming_clips_delegate)
+        self._naming_clips_table = table
+        self._refresh_naming_clips()
+
+    def _refresh_naming_clips(self):
+        """Reload the clip list, keeping the selection for clips that still exist."""
+        names = {f.name for f in self._files}
+        self._naming_selected &= names
+        if hasattr(self, "_naming_clips_table"):
+            from AppKit import NSMutableIndexSet
+            table    = self._naming_clips_table
+            delegate = self._naming_clips_delegate
+            delegate._suppressed = True
+            table.reloadData()
+            # Rows can shift after a rename, so rebuild the highlight from the names
+            table.deselectAll_(None)
+            rows = NSMutableIndexSet.alloc().init()
+            for i, f in enumerate(self._files):
+                if f.name in self._naming_selected:
+                    rows.addIndex_(i)
+            if self._naming_selected:
+                table.selectRowIndexes_byExtendingSelection_(rows, False)
+            delegate._suppressed = False
+        self._update_naming_selection_ui()
+
+    def _on_naming_selection_changed(self):
+        table = self._naming_clips_table
+        self._naming_selected = {
+            f.name for i, f in enumerate(self._files) if table.isRowSelected_(i)}
+        self._update_naming_selection_ui()
+
+    def _naming_clear_selection(self):
+        if hasattr(self, "_naming_clips_table"):
+            self._naming_clips_table.deselectAll_(None)
+
+    def _update_naming_selection_ui(self):
+        count = len(self._naming_selected)
+        if hasattr(self, "_naming_clips_status"):
+            if count:
+                text = (f"{count} of {len(self._files)} selected. "
+                        "Batch Rename will only rename these.")
+            else:
+                text = ("None selected, so Batch Rename will rename every clip. "
+                        "Click, ⇧-click or ⌘-click to choose clips.")
+            self._naming_clips_status.setStringValue_(text)
+            self._naming_clear_btn.setHidden_(count == 0)
+        if hasattr(self, "_batch_btn"):
+            title = f"Batch Rename ({count})" if count else "Batch Rename"
+            self._batch_btn.configureTitle_bg_press_action_(
+                title, "#8c2232", "#6b1a26", self._on_batch_rename)
 
     def _session_choose_folder(self):
         folder = pick_folder_dialog()
@@ -5369,8 +5720,20 @@ class TagWindowV2:
         BOT_PAD  = 12.0
 
         folder_row_y = ch - HEADER_H - FOLDER_H - GAP
-        FORM_W = min(560.0, cw - 80.0)
-        form_x = (cw - FORM_W) / 2
+        layout_w = self._naming_form_area_w(cw)
+        FORM_W = min(560.0, layout_w - 80.0)
+        form_x = (layout_w - FORM_W) / 2
+        self._conv_form_w = FORM_W
+        self._conv_form_x = form_x
+
+        if hasattr(self, "_naming_clips_panel"):
+            panel_hidden = cw < self.NAMING_CLIPS_MIN_W
+            self._naming_clips_panel.setHidden_(panel_hidden)
+            if panel_hidden:
+                self._naming_clear_selection()  # never filter by a selection the user can't see
+            self._naming_clips_panel.setFrame_(NSMakeRect(
+                cw - self.NAMING_CLIPS_W - 12.0, BOT_PAD,
+                self.NAMING_CLIPS_W, max(200.0, ch - HEADER_H - GAP - BOT_PAD)))
 
         if hasattr(self, "_folder_row"):
             self._folder_row.setFrame_(
@@ -5388,13 +5751,13 @@ class TagWindowV2:
         conv_h = max(120.0, folder_row_y - GAP - BOT_PAD)
         if hasattr(self, "_convention_sv"):
             sv = self._convention_sv
-            sv.setFrame_(NSMakeRect(0, conv_y, cw, conv_h))
+            sv.setFrame_(NSMakeRect(0, conv_y, layout_w, conv_h))
             doc = sv.documentView()
             if doc:
                 doc_h = doc.frame().size.height
                 # Keep doc width in sync so _rebuild_convention_rows uses correct cw
-                if doc.frame().size.width != cw:
-                    doc.setFrame_(NSMakeRect(0, 0, cw, doc_h))
+                if doc.frame().size.width != layout_w:
+                    doc.setFrame_(NSMakeRect(0, 0, layout_w, doc_h))
                 sv.contentView().scrollToPoint_((0, max(0.0, doc_h - conv_h)))
                 sv.reflectScrolledClipView_(sv.contentView())
 
@@ -7416,6 +7779,12 @@ class TagWindowV2:
                 ("para",
                  "Shortcut keys are single characters. The same key can be reused across "
                  "different steps — context (which step you're on) determines which label applies."),
+                ("subhead", "FINDER COLORS"),
+                ("para",
+                 "Click the pencil icon on a shortcut and choose a Finder color to label clips "
+                 "with that color when the shortcut is used, such as red for GOOD. The word "
+                 "stays in the filename as well. A dot on the shortcut shows its color. "
+                 "Relabeling a clip replaces its color, and Undo restores the previous one."),
             ]),
             ("Naming Conventions", [
                 ("para",
@@ -7443,6 +7812,12 @@ class TagWindowV2:
                 ("para",
                  "Batch Rename standardizes all video filenames in the selected folder using "
                  "the active naming preset. Run it before logging to establish the base filename."),
+                ("subhead", "RENAMING ONLY SOME CLIPS"),
+                ("para",
+                 "To rename part of a folder, such as one period, select clips in the Clips "
+                 "list on the Naming tab using click, ⇧-click or ⌘-click. The button then shows "
+                 "how many are selected, like 'Batch Rename (12)', and only those clips are "
+                 "renamed. With nothing selected, every clip in the folder is renamed."),
                 ("subhead", "DEFAULT FORMAT"),
                 ("para", "SPORT_OPPONENT_YYYYMMDD_HHMMSS_VID_PHASE.ext"),
                 ("para", "Example:   MBB_MIAMI_20260117_143022_AB_2H.mp4"),
@@ -7931,7 +8306,7 @@ class BasketballRenamerApp(rumps.App):
 
     # ── Batch rename ──────────────────────────────────────────────────────────
 
-    def batch_rename(self, _):
+    def batch_rename(self, _, only_names=None):
         folder = self.session.get("folder", "")
         ok, err = SafeRenamer.validate_folder(folder)
         if not ok:
@@ -7946,6 +8321,10 @@ class BasketballRenamerApp(rumps.App):
         )
         if not files:
             rumps.alert("No Files", f"No video files found in:\n{folder}")
+            return
+        files = select_batch_files(files, only_names)
+        if not files:
+            rumps.alert("No Files", "The selected clips are no longer in this folder.")
             return
 
         s            = self.session
@@ -7997,10 +8376,7 @@ class BasketballRenamerApp(rumps.App):
         # Count how many distinct base names (ignoring the _2 _3 suffix we
         # added above) come out of the plan.
         import collections as _col
-        base_stems = _col.Counter(
-            os.path.splitext(n)[0].rstrip("_0123456789").rstrip("_")
-            for _, n, _d in plan
-        )
+        base_stems = _col.Counter(batch_base_stem(n, deduped) for _, n, deduped in plan)
         most_common_base, most_common_count = base_stems.most_common(1)[0]
         if most_common_count > 1 and most_common_count >= len(plan) * 0.8:
             # 80%+ of files share the same base stem — very likely a missing unique field
@@ -8044,6 +8420,14 @@ class BasketballRenamerApp(rumps.App):
                 errors.append(f"  {src.name}: {err}")
 
         if snapshot["renames"]:
+            # A batch rename gives clips a fresh name, so earlier tag records no longer apply
+            records = load_json(TAG_RECORDS_FILE, {})
+            for r in snapshot["renames"]:
+                old_record = records.pop(r["old"], None)
+                records.pop(r["new"], None)
+                if old_record:
+                    r["record_before"] = old_record
+            save_tag_records(records)
             _max_stack = load_json(SETTINGS_FILE, DEFAULT_SETTINGS).get("undo_stack_size", 50)
             self._push_undo(snapshot, max_stack=_max_stack)
 
@@ -8275,6 +8659,13 @@ class BasketballRenamerApp(rumps.App):
             ok, err = SafeRenamer.safe_rename(src, dst, folder_path, self.session)
             if ok:
                 restored += 1
+                records = load_json(TAG_RECORDS_FILE, {})
+                records.pop(r["new"], None)
+                if "record_before" in r:
+                    records[r["old"]] = r["record_before"]
+                save_tag_records(records)
+                if "tags_before" in r:
+                    set_finder_tags(dst, r["tags_before"])
             else:
                 failed += 1
                 errors.append(f"  {r['new']}: {err}")

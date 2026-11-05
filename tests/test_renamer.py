@@ -377,3 +377,147 @@ def test_defaults_have_no_school_or_personal_values():
     assert renamer.DEFAULT_SESSION["opponent"] == "OPP"
     assert renamer.DEFAULT_SESSION["videographer"] == "VID"
     assert "bceagles" not in Path(renamer.__file__).read_text()
+
+
+# ── Search only applies to the player step ────────────────────────────────────
+
+def _key_window(step, shortcuts, search_on=True, number_search=False):
+    """A stand-in TagWindowV2 positioned on one step of the logging flow."""
+    win = MagicMock()
+    win._search_mode = False
+    win._custom_mode = False
+    win._branch_items = None
+    win._search_enabled = search_on
+    win._player_number_search = number_search
+    win.step = step
+    win.shortcuts = shortcuts
+    win._steps = ["players", "plays", "ratings"]
+    return win
+
+RATING_BANKS = {
+    "players": [{"key": "g", "label": "GREEN"}],
+    "ratings": [{"key": "g", "label": "GOOD"}, {"key": "1", "label": "MISS"}],
+}
+
+def test_letter_on_rating_step_picks_shortcut_with_search_on():
+    win = _key_window("ratings", RATING_BANKS)
+    renamer.TagWindowV2.handle_key(win, "g")
+    win._enter_search_mode.assert_not_called()
+    win._handle_shortcut_key_v2.assert_called_once_with(RATING_BANKS["ratings"][0])
+
+def test_number_on_rating_step_picks_shortcut_with_number_search_on():
+    win = _key_window("ratings", RATING_BANKS, number_search=True)
+    renamer.TagWindowV2.handle_key(win, "1")
+    win._enter_search_mode.assert_not_called()
+    win._handle_shortcut_key_v2.assert_called_once_with(RATING_BANKS["ratings"][1])
+
+def test_letter_on_player_step_starts_search():
+    win = _key_window("players", RATING_BANKS)
+    renamer.TagWindowV2.handle_key(win, "g")
+    win._enter_search_mode.assert_called_once_with("g")
+    win._handle_shortcut_key_v2.assert_not_called()
+
+
+# ── Clicking a shortcut pill ──────────────────────────────────────────────────
+
+def test_pill_click_on_active_step_applies_shortcut():
+    win = _key_window("ratings", RATING_BANKS)
+    sc = RATING_BANKS["ratings"][0]
+    renamer.TagWindowV2._on_shortcut_pill_click(win, "ratings", sc)
+    win._handle_shortcut_key_v2.assert_called_once_with(sc)
+
+def test_pill_click_on_other_step_does_nothing():
+    win = _key_window("ratings", RATING_BANKS)
+    renamer.TagWindowV2._on_shortcut_pill_click(win, "players", RATING_BANKS["players"][0])
+    win._handle_shortcut_key_v2.assert_not_called()
+
+def test_pill_click_ignored_while_typing_custom_label():
+    win = _key_window("ratings", RATING_BANKS)
+    win._custom_mode = True
+    renamer.TagWindowV2._on_shortcut_pill_click(win, "ratings", RATING_BANKS["ratings"][0])
+    win._handle_shortcut_key_v2.assert_not_called()
+
+
+# ── Relabeling replaces earlier labels ────────────────────────────────────────
+
+def test_relabel_drops_labels_from_short_base():
+    record = {"base": "MBB_ND_20260101"}
+    assert renamer.tag_base_stem("MBB_ND_20260101_SMITH_LAYUP_GOOD", record) == "MBB_ND_20260101"
+
+def test_relabel_drops_labels_from_long_base():
+    base = "MBB_ND_20260101_143022_AB_2H_CAM1"
+    assert renamer.tag_base_stem(f"{base}_SMITH_GOOD", {"base": base}) == base
+
+def test_clip_with_no_record_keeps_whole_name():
+    assert renamer.tag_base_stem("MBB_ND_20260101_", None) == "MBB_ND_20260101"
+    assert renamer.tag_base_stem("C0001", None) == "C0001"
+
+def test_record_that_does_not_match_name_is_ignored():
+    assert renamer.tag_base_stem("OTHER_NAME", {"base": "MBB_ND"}) == "OTHER_NAME"
+    assert renamer.tag_base_stem("MBB_NDX_SMITH", {"base": "MBB_ND"}) == "MBB_NDX_SMITH"
+
+
+# ── Selecting clips for Batch Rename ──────────────────────────────────────────
+
+def test_batch_with_no_selection_uses_every_file():
+    files = [Path("a.mp4"), Path("b.mp4")]
+    assert renamer.select_batch_files(files, None) == files
+    assert renamer.select_batch_files(files, set()) == files
+
+def test_batch_with_selection_uses_only_selected():
+    files = [Path("a.mp4"), Path("b.mp4"), Path("c.mp4")]
+    assert renamer.select_batch_files(files, {"a.mp4", "c.mp4"}) == [files[0], files[2]]
+
+def test_batch_with_stale_selection_uses_nothing():
+    assert renamer.select_batch_files([Path("a.mp4")], {"gone.mp4"}) == []
+
+
+# ── Finder colors ─────────────────────────────────────────────────────────────
+
+COLOR_BANKS = {
+    "players": [{"key": "1", "label": "GOOD"}],
+    "ratings": [
+        {"key": "g", "label": "GOOD", "finder_color": "Red"},
+        {"key": "r", "label": "REAX", "finder_color": "Blue"},
+        {"key": "m", "label": "MISS"},
+        {"key": "s", "label": "SAVE", "finder_color": "Green", "children": [
+            {"key": "h", "label": "HIGH"},
+            {"key": "l", "label": "LOW", "finder_color": "Purple"},
+        ]},
+    ],
+}
+COLOR_STEPS = ["players", "ratings"]
+
+@pytest.mark.parametrize("parts, custom, expected", [
+    (["SMITH", "GOOD"], set(), ["Red"]),
+    (["SMITH", "REAX"], set(), ["Blue"]),
+    (["SMITH", "MISS"], set(), []),
+    (["SMITH", "HIGH"], set(), ["Green"]),
+    (["SMITH", "LOW"], set(), ["Purple"]),
+    (["SMITH", "GOOD", "JONES", "REAX"], set(), ["Red", "Blue"]),
+    (["SMITH", "GOOD", "JONES", "GOOD"], set(), ["Red"]),
+    (["SMITH", "GOOD"], {1}, []),
+])
+def test_finder_colors_for_tags(parts, custom, expected):
+    assert renamer.finder_colors_for_tags(parts, custom, COLOR_BANKS, COLOR_STEPS) == expected
+
+def test_player_bank_never_sets_a_color():
+    banks = {"players": [{"key": "1", "label": "SMITH", "finder_color": "Red"}], "ratings": []}
+    assert renamer.finder_colors_for_tags(["SMITH"], set(), banks, COLOR_STEPS) == []
+
+def test_merged_tags_replace_colors_and_keep_other_tags():
+    assert renamer.merged_finder_tags(["Blue", "Highlights"], ["Red"], []) == ["Highlights", "Red"]
+
+def test_merged_tags_without_new_color_remove_only_app_colors():
+    assert renamer.merged_finder_tags(["Red", "Blue"], [], ["Red"]) == ["Blue"]
+    assert renamer.merged_finder_tags(["Blue"], [], []) == ["Blue"]
+
+
+# ── Batch rename duplicate guard ──────────────────────────────────────────────
+
+def test_names_ending_in_time_are_not_treated_as_duplicates():
+    assert (renamer.batch_base_stem("MBB_20260101_120000_.mp4", False)
+            != renamer.batch_base_stem("MBB_20260101_120501_.mp4", False))
+
+def test_added_suffix_counts_as_a_duplicate():
+    assert renamer.batch_base_stem("MBB_.mp4", False) == renamer.batch_base_stem("MBB__2.mp4", True)
