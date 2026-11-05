@@ -7841,11 +7841,12 @@ class TagWindowV2:
             ]),
             ("Setup Session", [
                 ("para",
-                 "Configure your session before logging. Click Save Session to apply — "
-                 "the top status bar updates immediately."),
+                 "Configure your session before logging. Choose ⚙️ Setup Session from the menu "
+                 "bar icon and answer each prompt. The current session is shown at the top "
+                 "of that menu."),
                 ("subhead", "FIELDS"),
                 ("table", [
-                    ("Sport",        "Select from the dropdown, or use the Team tab sport pill"),
+                    ("Sport",        "Enter the sport code, or use the Team tab sport pill"),
                     ("Opponent",     "Opposing team code (e.g. MIAMI, DUKE, YALE)"),
                     ("Videographer", "Your initials or operator code (e.g. AB)"),
                     ("Phase",        "Game phase: PRE · 1H · 2H · OT · POST · PRAC · SCOUT"),
@@ -7861,12 +7862,29 @@ class TagWindowV2:
                     ("1",     "Select a file from the file list"),
                     ("2",     "Press SPACE to QuickLook preview the clip (optional)"),
                     ("3",     "Press ENTER to begin logging"),
-                    ("4–N",   "Press shortcut keys at each step, then ENTER to advance"),
+                    ("4–N",   "Press shortcut keys or click buttons at each step, then ENTER to advance"),
                     ("Final", "ENTER on the last step tags the file and marks it ✓"),
                 ]),
                 ("para",
                  "At each step you can press multiple shortcut keys before advancing — "
                  "labels accumulate. Press ESC at any time to cancel."),
+                ("subhead", "CLICKING BUTTONS"),
+                ("para",
+                 "Every button in the Log Mode cards does the same thing as pressing its key. "
+                 "Clicking a player with a clip selected and no log in progress starts the log. "
+                 "Anything clickable lifts when you point at it and pushes in when clicked."),
+                ("subhead", "SEARCHING FOR PLAYERS"),
+                ("para",
+                 "Turn on Search in the top bar, then start typing a player's name on the Player "
+                 "step. Click a name in the list, or use ↑ ↓ and press ENTER. Search only runs on "
+                 "the Player step, so letter and number keys on every other step go straight to "
+                 "that step's shortcuts."),
+                ("subhead", "FIXING A LABEL"),
+                ("para",
+                 "To correct a clip, select it and log it again. The new labels and Finder color "
+                 "replace the old ones. Clips labeled before version 1.0.2 keep their old labels "
+                 "and add the new ones after them. Each log adds to Stats, and neither relabeling "
+                 "nor Undo removes the earlier entry."),
                 ("subhead", "CUSTOM INSERT  (⌥ OPTION)"),
                 ("para",
                  "At any step, hold Option then type free-form text instead of a shortcut. "
@@ -7874,8 +7892,8 @@ class TagWindowV2:
                  "the last character, or ⌥ Option again to cancel without confirming."),
                 ("subhead", "UNDO  (⌘Z)"),
                 ("para",
-                 "Reverses the last logged rename. Works from the keyboard in Log Mode "
-                 "or from the menubar."),
+                 "Reverses the last logged rename and restores the clip's previous Finder color. "
+                 "Works from the keyboard in Log Mode or from the menubar."),
             ]),
             ("Team & Roster", [
                 ("para", "The Team tab manages the player list for the active sport."),
@@ -7951,14 +7969,15 @@ class TagWindowV2:
             ]),
             ("Batch Rename", [
                 ("para",
-                 "Batch Rename standardizes all video filenames in the selected folder using "
+                 "Batch Rename standardizes video filenames in the selected folder using "
                  "the active naming preset. Run it before logging to establish the base filename."),
                 ("subhead", "RENAMING ONLY SOME CLIPS"),
                 ("para",
                  "To rename part of a folder, such as one period, select clips in the Clips "
                  "list on the Naming tab using click, ⇧-click or ⌘-click. The button then shows "
                  "how many are selected, like 'Batch Rename (12)', and only those clips are "
-                 "renamed. With nothing selected, every clip in the folder is renamed."),
+                 "renamed. With nothing selected, every clip in the folder is renamed. "
+                 "If the Clips list isn't showing, make the window wider."),
                 ("subhead", "DEFAULT FORMAT"),
                 ("para", "SPORT_OPPONENT_YYYYMMDD_HHMMSS_VID_PHASE.ext"),
                 ("para", "Example:   MBB_MIAMI_20260117_143022_AB_2H.mp4"),
@@ -7989,10 +8008,14 @@ class TagWindowV2:
             ("Settings", [
                 ("subhead", "ALWAYS SEARCH FOR PLAYER NAMES"),
                 ("para",
-                 "When enabled, the Player step switches to search mode: type any part of a "
+                 "When enabled, the Player step switches to search mode: start typing a "
                  "player's name to filter the list — no need to memorize shortcut keys. "
-                 "Press ENTER to confirm the highlighted match. "
+                 "Click a name or press ENTER to confirm the highlighted match. "
                  "Toggle at any time; takes effect immediately on the next log."),
+                ("subhead", "SEARCH PLAYERS BY JERSEY NUMBER"),
+                ("para",
+                 "When enabled, typing digits on the Player step searches by jersey number "
+                 "instead of using number shortcut keys. Other steps are not affected."),
                 ("subhead", "ROSTER DOMAIN"),
                 ("para",
                  "Click '🔗 domain.com' in the Team header to set the base URL for roster "
@@ -8003,11 +8026,12 @@ class TagWindowV2:
                 ("table", [
                     ("ENTER",          "Begin logging · advance step · confirm custom insert"),
                     ("SPACE",          "QuickLook preview of the selected file"),
-                    ("ESC",            "Cancel the current log, return to idle"),
+                    ("ESC",            "Close player search, or cancel the current log"),
                     ("[key]",          "Apply shortcut — stays on current step to allow stacking"),
                     ("⌥ Option",       "Enter custom-insert mode (spaces preserved as typed)"),
                     ("⌥ Option again", "Cancel custom-insert without confirming"),
-                    ("Backspace",      "Delete last character in custom-insert mode"),
+                    ("Backspace",      "Remove the last label · delete a character in custom-insert mode"),
+                    ("↑ / ↓",          "Move through player search results"),
                     ("TAB",            "Advance to the next file (only when not mid-tag)"),
                     ("⌘Z",            "Undo the last logged file rename"),
                 ]),
