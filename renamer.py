@@ -1028,13 +1028,19 @@ NamingClipsDelegate  = None
 QLDataSource         = None
 SearchResultsDelegate = None
 SearchResultsTable = None
+HoverButton = None
+add_hover_highlight = None
+clear_hover_highlight = None
+hover_press_down = None
+hover_press_up = None
+hover_dip = None
 WindowDelegate       = None
 FilePanelResizer     = None
 NowCardResizer       = None
 CardHeightResizer    = None
 
 def make_objc_classes():
-    global _classes_made, KeyTableView, NavItemView, ActionButton, PillButton, MenuTarget, MainCaller, FileListDelegate, NamingClipsDelegate, QLDataSource, SearchResultsDelegate, SearchResultsTable, WindowDelegate, FilePanelResizer, NowCardResizer, CardHeightResizer
+    global _classes_made, KeyTableView, NavItemView, ActionButton, PillButton, MenuTarget, MainCaller, FileListDelegate, NamingClipsDelegate, QLDataSource, SearchResultsDelegate, SearchResultsTable, HoverButton, add_hover_highlight, clear_hover_highlight, hover_press_down, hover_press_up, hover_dip, WindowDelegate, FilePanelResizer, NowCardResizer, CardHeightResizer
     if _classes_made:
         return
     _classes_made = True
@@ -1042,8 +1048,169 @@ def make_objc_classes():
     import objc
     from AppKit import (
         NSObject, NSTableView, NSView, NSTextField, NSFont, NSColor,
-        NSImage, NSImageView, NSMakeRect,
+        NSImage, NSImageView, NSMakeRect, NSButton,
     )
+
+    _HOVER_KEY = "ez_logger_hover_tracker"
+
+    def _depth_colors(pressed):
+        """Gradient for a lit, raised button, or a shaded, pushed-in one."""
+        from Quartz import CGColorCreateGenericRGB as rgb
+        if pressed:
+            return [rgb(0, 0, 0, 0.32), rgb(0, 0, 0, 0.04)]
+        return [rgb(1, 1, 1, 0.26), rgb(1, 1, 1, 0.05)]
+
+    def _scale_about_center(view, scale):
+        """The backing layer scales from its anchor, so shift to keep the center fixed."""
+        from Quartz import CATransform3DMakeTranslation, CATransform3DScale
+        layer  = view.layer()
+        size   = layer.bounds().size
+        anchor = layer.anchorPoint()
+        dx = size.width  * (0.5 - anchor.x) * (1 - scale)
+        dy = size.height * (0.5 - anchor.y) * (1 - scale)
+        return CATransform3DScale(CATransform3DMakeTranslation(dx, dy, 0), scale, scale, 1)
+
+    def _motion_allowed():
+        from AppKit import NSWorkspace
+        return not NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+
+    class _HoverTracker(NSObject):
+        """Gives a clickable view physical depth: it lifts on hover and pushes in on
+        click. Only reacts in the key window, so nothing behind a dialog lights up.
+        Press motion is animation only, so AppKit's layout never sees a changed frame."""
+        _view_ref = None
+        _overlay  = None
+        _hovering = False
+        _pressed  = False
+
+        def mouseEntered_(self, _event):
+            self.setOn_(True)
+
+        def mouseExited_(self, _event):
+            self.setOn_(False)
+
+        def setOn_(self, on):
+            self._hovering = bool(on)
+            if not on:
+                self._pressed = False
+            self.refresh()
+
+        def ensureOverlay(self):
+            from Quartz import CAGradientLayer, CGColorCreateGenericRGB
+            view = self._view_ref() if self._view_ref else None
+            if view is None or view.layer() is None:
+                return None
+            if self._overlay is None:
+                overlay = CAGradientLayer.layer()
+                overlay.setFrame_(view.layer().bounds())
+                overlay.setCornerRadius_(view.layer().cornerRadius() or 6.0)
+                overlay.setBorderWidth_(0.75)
+                overlay.setBorderColor_(CGColorCreateGenericRGB(1, 1, 1, 0.22))
+                overlay.setOpacity_(0.0)
+                overlay.setAutoresizingMask_(2 | 16)  # follows width and height
+                view.layer().addSublayer_(overlay)
+                self._overlay = overlay
+            return self._overlay
+
+        def refresh(self):
+            from Quartz import CATransaction
+            overlay = self.ensureOverlay()
+            if overlay is None:
+                return
+            layer = self._view_ref().layer()
+            CATransaction.begin()
+            CATransaction.setAnimationDuration_(0.12)
+            overlay.setColors_(_depth_colors(self._pressed))
+            overlay.setOpacity_(1.0 if (self._hovering or self._pressed) else 0.0)
+            CATransaction.commit()
+            raised = self._hovering and not self._pressed
+            layer.setMasksToBounds_(False)
+            layer.setShadowOpacity_(0.45 if raised else 0.0)
+            layer.setShadowRadius_(5.0)
+            layer.setShadowOffset_((0, -2))
+
+    def _tracker(view):
+        return objc.getAssociatedObject(view, _HOVER_KEY)
+
+    def add_hover_highlight(view):
+        """Make `view` lift on hover. Safe to call more than once."""
+        from AppKit import NSTrackingArea
+        from Foundation import NSZeroRect
+        if _tracker(view) is not None:
+            return
+        view.setWantsLayer_(True)
+        tracker = _HoverTracker.alloc().init()
+        tracker._view_ref = objc.WeakRef(view)
+        objc.setAssociatedObject(view, _HOVER_KEY, tracker)  # lives as long as the view
+        options = 0x01 | 0x20 | 0x200  # entered/exited, key window only, visible rect
+        view.addTrackingArea_(NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+            NSZeroRect, options, tracker, None))
+
+    def clear_hover_highlight(view):
+        tracker = _tracker(view)
+        if tracker is not None:
+            tracker.setOn_(False)
+
+    def hover_press_down(view):
+        """Push in and hold, for controls that act when the mouse is released."""
+        from AppKit import NSValue
+        from Quartz import CABasicAnimation
+        tracker = _tracker(view)
+        if tracker is None:
+            return
+        tracker._pressed = True
+        tracker.refresh()
+        if _motion_allowed():
+            anim = CABasicAnimation.animationWithKeyPath_("transform")
+            anim.setToValue_(NSValue.valueWithCATransform3D_(_scale_about_center(view, 0.95)))
+            anim.setDuration_(0.07)
+            anim.setFillMode_("forwards")
+            anim.setRemovedOnCompletion_(False)
+            view.layer().addAnimation_forKey_(anim, "ez_press")
+
+    def hover_press_up(view):
+        """Spring back from hover_press_down."""
+        from AppKit import NSValue
+        from Quartz import CASpringAnimation, CATransform3DIdentity
+        tracker = _tracker(view)
+        if tracker is None:
+            return
+        tracker._pressed = False
+        tracker.refresh()
+        if _motion_allowed():
+            spring = CASpringAnimation.animationWithKeyPath_("transform")
+            spring.setFromValue_(NSValue.valueWithCATransform3D_(_scale_about_center(view, 0.95)))
+            spring.setToValue_(NSValue.valueWithCATransform3D_(CATransform3DIdentity))
+            spring.setStiffness_(420.0)
+            spring.setDamping_(24.0)
+            spring.setDuration_(spring.settlingDuration())
+            view.layer().addAnimation_forKey_(spring, "ez_press")  # replaces the hold
+
+    def hover_dip(view):
+        """One complete push-in and bounce, for controls that act on mouse down. It can't
+        wait for mouse up: the action may open a dialog that swallows the release."""
+        from AppKit import NSValue
+        from Quartz import CAKeyframeAnimation
+        tracker = _tracker(view)
+        if tracker is None:
+            return
+        overlay = tracker.ensureOverlay()
+        if overlay is None:
+            return
+        times = [0.0, 0.3, 0.7, 1.0]
+        lit, shaded = _depth_colors(False), _depth_colors(True)
+        tint = CAKeyframeAnimation.animationWithKeyPath_("colors")
+        tint.setValues_([lit, shaded, lit, lit])
+        tint.setKeyTimes_(times)
+        tint.setDuration_(0.24)
+        overlay.addAnimation_forKey_(tint, "ez_dip")
+        if _motion_allowed():
+            dip = CAKeyframeAnimation.animationWithKeyPath_("transform")
+            dip.setValues_([NSValue.valueWithCATransform3D_(_scale_about_center(view, k))
+                            for k in (1.0, 0.94, 1.015, 1.0)])
+            dip.setKeyTimes_(times)
+            dip.setDuration_(0.24)
+            view.layer().addAnimation_forKey_(dip, "ez_dip")
 
     class _KeyTableView(NSTableView):
         owner = None
@@ -1088,6 +1255,7 @@ def make_objc_classes():
         def configureKey_symbol_label_owner_(self, key, symbol, label, owner):
             self._key   = key
             self._owner = owner
+            add_hover_highlight(self)
             w = self.frame().size.width
 
             icon = NSImageView.alloc().initWithFrame_(NSMakeRect(14, 8, 20, 20))
@@ -1129,6 +1297,7 @@ def make_objc_classes():
                 if self._icon: self._icon.setContentTintColor_(NSColor.secondaryLabelColor())
 
         def mouseDown_(self, event):
+            hover_dip(self)
             if self._owner is not None:
                 self._owner._on_nav_select(self._key)
 
@@ -1151,6 +1320,7 @@ def make_objc_classes():
             self._action   = action
             self._bg       = bg_hex
             self._bg_press = press_hex
+            add_hover_highlight(self)
             for v in list(self.subviews()):
                 v.removeFromSuperview()
             w = self.frame().size.width
@@ -1169,13 +1339,18 @@ def make_objc_classes():
         def mouseDown_(self, event):
             self._pressed = True
             self.layer().setBackgroundColor_(_hex_color(self._bg_press).CGColor())
+            hover_press_down(self)
 
         def mouseUp_(self, event):
             was_pressed = self._pressed
             self._pressed = False
             self.layer().setBackgroundColor_(_hex_color(self._bg).CGColor())
+            hover_press_up(self)
             if was_pressed and self._action is not None:
                 self._action()
+
+        def viewDidHide(self):
+            clear_hover_highlight(self)  # hidden views never get a mouse-exit
 
     ActionButton = _ActionButton
 
@@ -1191,6 +1366,8 @@ def make_objc_classes():
 
         def setClickHandler_(self, handler):
             self._handler = handler
+            if handler is not None:  # pills without a handler are not clickable
+                add_hover_highlight(self)
 
         def hitTest_(self, point):
             result = objc.super(_PillButton, self).hitTest_(point)
@@ -1198,8 +1375,12 @@ def make_objc_classes():
                 return self
             return None
 
+        def viewDidHide(self):
+            clear_hover_highlight(self)  # hidden views never get a mouse-exit
+
         def mouseDown_(self, event):
             if self._handler is not None:
+                hover_dip(self)
                 self._handler(self, event)
 
     PillButton = _PillButton
@@ -1211,6 +1392,13 @@ def make_objc_classes():
                 cb(sender.representedObject())
 
     MenuTarget = _MenuTarget
+
+    class _HoverButton(NSButton):
+        def mouseDown_(self, event):
+            hover_dip(self)
+            objc.super(_HoverButton, self).mouseDown_(event)
+
+    HoverButton = _HoverButton
 
     class _MainCaller(NSObject):
         def fire_(self, _):
@@ -1774,28 +1962,6 @@ class TagWindowV2:
         topbar.addSubview_(tog)
         self._search_toggle_btn = tog
 
-        # Session status indicator (left side of top bar)
-        SES_W, SES_H = 200, 28
-        ses_btn = PillButton.alloc().initWithFrame_(
-            NSMakeRect(16, (TOP_H - SES_H) / 2, SES_W, SES_H))
-        ses_btn.layer().setCornerRadius_(6.0)
-        ses_btn.layer().setBackgroundColor_(_hex_color("#3a3a3c").CGColor())
-        ses_btn.layer().setBorderWidth_(0.5)
-        ses_btn.layer().setBorderColor_(_hex_color_alpha("#ffffff", 0.15).CGColor())
-        ses_btn.setAutoresizingMask_(8)  # minYMargin (top-anchored)
-        ses_btn.setClickHandler_(self._on_session_status_btn)
-        topbar.addSubview_(ses_btn)
-        self._session_status_btn = ses_btn
-
-        ses_lbl = NSTextField.labelWithString_("...")
-        ses_lbl.setFont_(NSFont.systemFontOfSize_(12))
-        ses_lbl.setTextColor_(NSColor.secondaryLabelColor())
-        ses_lbl.setLineBreakMode_(4)   # NSLineBreakByTruncatingTail
-        ses_lbl.setFrame_(NSMakeRect(10, (SES_H - 16) / 2, SES_W - 20, 16))
-        ses_btn.addSubview_(ses_lbl)
-        self._session_status_lbl = ses_lbl
-        self._update_session_status_btn()
-
         # Now Tagging card (Tag Mode section)
         self._build_now_tagging_card(cv, W, H, SIDEBAR_W, TOP_H)
 
@@ -2085,8 +2251,6 @@ class TagWindowV2:
         is_settings = (key == "settings")
         is_help     = (key == "help")
 
-        if is_tag and hasattr(self, "_session_status_btn"):
-            self._update_session_status_btn()
         if is_tag and hasattr(self, "_file_list_table"):
             # Logging keys only reach the app while the Log file list has focus
             self.win.makeFirstResponder_(self._file_list_table)
@@ -2179,31 +2343,6 @@ class TagWindowV2:
                 self._on_nav_select("session")
             return
         self.app.batch_rename(None, only_names=set(self._naming_selected) or None)
-
-    def _on_session_status_btn(self):
-        self._on_nav_select("session")
-
-    def _update_session_status_btn(self):
-        if not hasattr(self, "_session_status_lbl"):
-            return
-        if not self.app:
-            return
-        from AppKit import NSColor
-        s         = self.app.session
-        sport_key = s.get("sport", "MBB")
-        opponent  = s.get("opponent", "").strip()
-        emoji     = SPORTS.get(sport_key, {}).get("emoji", "🏀")
-        if opponent:
-            text  = f"{emoji}  {sport_key}  ·  vs  {opponent}"
-            bg    = _hex_color("#3a3a3c").CGColor()
-            tc    = NSColor.secondaryLabelColor()
-        else:
-            text  = "⚙  Configure session →"
-            bg    = _hex_color("#4a1a26").CGColor()
-            tc    = _hex_color(COLOR_CRIMSON)
-        self._session_status_lbl.setStringValue_(text)
-        self._session_status_lbl.setTextColor_(tc)
-        self._session_status_btn.layer().setBackgroundColor_(bg)
 
     def _toggle_search_mode(self):
         self._apply_search_mode(not self._search_enabled)
@@ -4183,7 +4322,7 @@ class TagWindowV2:
 
     def _make_icon_btn(self, parent, x, y, w, h, symbol, action):
         from AppKit import NSButton, NSImage, NSColor, NSMakeRect
-        btn = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
+        btn = HoverButton.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
         btn.setBordered_(False)
         img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol, None)
         if img:
@@ -4193,6 +4332,7 @@ class TagWindowV2:
         target._callback = lambda _: action()
         btn.setTarget_(target)
         btn.setAction_("menuPicked:")
+        add_hover_highlight(btn)
         parent.addSubview_(btn)
         if not hasattr(self, "_btn_targets"):
             self._btn_targets = []
@@ -7161,11 +7301,12 @@ class TagWindowV2:
 
             t = MenuTarget.alloc().init()
             t._callback = lambda _, n=name: self._toggle_stats_player(n)
-            btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, pw, ROW_H))
+            btn = HoverButton.alloc().initWithFrame_(NSMakeRect(0, 0, pw, ROW_H))
             btn.setBordered_(False)
             btn.setTitle_("")
             btn.setTarget_(t)
             btn.setAction_("menuPicked:")
+            add_hover_highlight(btn)
             row.addSubview_(btn)
             self._stats_row_targets.append(t)
 
@@ -7969,7 +8110,7 @@ class TagWindowV2:
             self._toc_targets = []
         toc_y = content_area_h - 74.0
         for idx, (title, _) in enumerate(sections):
-            btn = NSButton.alloc().initWithFrame_(
+            btn = HoverButton.alloc().initWithFrame_(
                 NSMakeRect(8, toc_y, TOC_W - 16, 30))
             btn.setBordered_(False)
             btn.setAttributedTitle_(self._make_toc_attr(title, NSColor.secondaryLabelColor()))
@@ -7981,6 +8122,7 @@ class TagWindowV2:
             t._callback = lambda _, i=idx: self._help_scroll_to(i)
             btn.setTarget_(t)
             btn.setAction_("menuPicked:")
+            add_hover_highlight(btn)
             self._toc_targets.append(t)
             toc_panel.addSubview_(btn)
             self._help_toc_btns.append((btn, title))
@@ -8271,8 +8413,6 @@ class BasketballRenamerApp(rumps.App):
                 roster_size = len(self.shortcuts.get("players", []))
                 if roster_size >= threshold and not win._player_search_mode:
                     win._apply_search_mode(True)
-            if hasattr(win, "_update_session_status_btn"):
-                win._update_session_status_btn()
         caller = MainCaller.alloc().init()
         caller._cb = refresh
         caller.performSelectorOnMainThread_withObject_waitUntilDone_(
