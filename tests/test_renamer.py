@@ -372,8 +372,49 @@ def test_fetch_roster_uses_saved_school_url(tmp_path, saved):
 def test_every_sport_has_a_roster_slug():
     assert set(renamer.SPORTS) == set(renamer.SLUG_TO_CODE.values())
 
+def test_every_sport_has_play_and_rating_templates():
+    assert set(renamer.SPORT_PLAY_TEMPLATES) == set(renamer.SPORTS)
+    assert set(renamer.SPORT_RATING_TEMPLATES) == set(renamer.SPORTS)
+
+@pytest.mark.parametrize("sport", sorted(renamer.SPORTS))
+@pytest.mark.parametrize("bank, templates", [
+    ("plays", renamer.SPORT_PLAY_TEMPLATES),
+    ("ratings", renamer.SPORT_RATING_TEMPLATES),
+])
+def test_template_labels_and_keys_are_usable(sport, bank, templates):
+    items = renamer.default_shortcuts(sport)[bank]
+    labels = [sc["label"] for sc in items]
+    keys = [sc["key"] for sc in items]
+    assert labels == templates[sport], "every label gets a hotkey"
+    assert labels and len(set(labels)) == len(labels)
+    assert len(set(keys)) == len(keys) and all(len(k) == 1 for k in keys)
+    assert not set(keys) & set("=+")
+    assert all(label == label.upper() and "/" not in label and ":" not in label for label in labels)
+
+def test_templates_match_the_sport():
+    assert "LAYUP" in renamer.SPORT_PLAY_TEMPLATES["WBB"]
+    assert "LAYUP" not in renamer.SPORT_PLAY_TEMPLATES["MHK"]
+    assert "HOME RUN" in renamer.SPORT_PLAY_TEMPLATES["SB"]
+    assert "FOUL" in renamer.SPORT_RATING_TEMPLATES["MBB"]
+    assert "SAFE" in renamer.SPORT_RATING_TEMPLATES["BASE"]
+    assert "SAFE" not in renamer.SPORT_RATING_TEMPLATES["FB"]
+
+def test_unknown_sport_still_gets_usable_shortcuts():
+    sc = renamer.default_shortcuts("NOPE")
+    assert sc["players"] == [] and sc["plays"] == []
+    assert [s["label"] for s in sc["ratings"]] == ["GOOD", "MISS"]
+
+def test_default_shortcuts_returns_independent_copies():
+    first = renamer.default_shortcuts("FB")
+    first["plays"].append({"key": "z", "label": "EDITED"})
+    first["plays"][0]["label"] = "EDITED"
+    first["ratings"][0]["label"] = "EDITED"
+    first["players"].append({"key": "1", "label": "EDITED"})
+    second = renamer.default_shortcuts("FB")
+    assert "EDITED" not in repr(second)
+
 def test_defaults_have_no_school_or_personal_values():
-    assert renamer.DEFAULT_SHORTCUTS["players"] == []
+    assert renamer.default_shortcuts("MBB")["players"] == []
     assert renamer.DEFAULT_SESSION["opponent"] == "OPP"
     assert renamer.DEFAULT_SESSION["videographer"] == "VID"
     assert "bceagles" not in Path(renamer.__file__).read_text()

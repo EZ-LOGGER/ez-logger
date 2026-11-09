@@ -271,22 +271,51 @@ DEFAULT_SESSION = {
     ],
 }
 
-DEFAULT_SHORTCUTS = {
-    "players": [],
-    "plays": [
-        {"key": "1", "label": "LAYUP"},
-        {"key": "2", "label": "THREE"},
-        {"key": "3", "label": "POST UP"},
-        {"key": "4", "label": "DRIVE"},
-        {"key": "5", "label": "CLOSE UP"},
-    ],
-    "ratings": [
-        {"key": "1", "label": "GOOD"},
-        {"key": "2", "label": "MISS"},
-        {"key": "3", "label": "FOUL"},
-        {"key": "4", "label": "TO"},
-    ],
+# Starter Play and Rating labels, assigned hotkeys in order from TEMPLATE_KEYS.
+_BASKETBALL_PLAYS = ["LAYUP", "THREE", "DUNK", "JUMPER", "FLOATER", "POST UP",
+                     "DRIVE", "FREE THROW", "ASSIST", "REBOUND", "STEAL", "BLOCK"]
+_HOCKEY_PLAYS = ["GOAL", "ASSIST", "SHOT", "SAVE", "HIT", "FACEOFF",
+                 "BREAKAWAY", "ONE TIMER", "POWER PLAY", "PENALTY", "BLOCK", "TAKEAWAY"]
+SPORT_PLAY_TEMPLATES = {
+    "MBB":  _BASKETBALL_PLAYS,
+    "WBB":  _BASKETBALL_PLAYS,
+    "MHK":  _HOCKEY_PLAYS,
+    "WHK":  _HOCKEY_PLAYS,
+    "FB":   ["RUN", "PASS", "CATCH", "TOUCHDOWN", "SACK", "TACKLE",
+             "INT", "FUMBLE", "KICKOFF", "PUNT", "FIELD GOAL", "BLOCK"],
+    "WLAX": ["GOAL", "ASSIST", "SHOT", "SAVE", "DODGE", "DRAW",
+             "GROUND BALL", "FREE POS", "CLEAR", "CHECK", "INTERCEPT", "CAUSED TO"],
+    "BASE": ["PITCH", "STRIKEOUT", "SINGLE", "DOUBLE", "TRIPLE", "HOME RUN",
+             "WALK", "BUNT", "STOLEN BASE", "DOUBLE PLAY", "CATCH", "THROW OUT"],
+    "SB":   ["PITCH", "STRIKEOUT", "SINGLE", "DOUBLE", "TRIPLE", "HOME RUN",
+             "BUNT", "SLAP", "STOLEN BASE", "DOUBLE PLAY", "CATCH", "THROW OUT"],
 }
+_BASKETBALL_RATINGS = ["GOOD", "MISS", "FOUL", "TO"]
+_HOCKEY_RATINGS     = ["GOOD", "MISS", "SAVED", "BLOCKED", "TO"]
+_DIAMOND_RATINGS    = ["GOOD", "SAFE", "OUT", "FOUL BALL", "ERROR"]
+SPORT_RATING_TEMPLATES = {
+    "MBB":  _BASKETBALL_RATINGS,
+    "WBB":  _BASKETBALL_RATINGS,
+    "MHK":  _HOCKEY_RATINGS,
+    "WHK":  _HOCKEY_RATINGS,
+    "FB":   ["GOOD", "NO GAIN", "LOSS", "FLAG", "TO"],
+    "WLAX": ["GOOD", "MISS", "SAVED", "FOUL", "TO"],
+    "BASE": _DIAMOND_RATINGS,
+    "SB":   _DIAMOND_RATINGS,
+}
+# No "0": the shortcut editors sort digit keys numerically, which would move it to the front.
+TEMPLATE_KEYS = "123456789qwe"
+
+def default_shortcuts(sport_key: str) -> dict:
+    """Starter shortcuts for a sport with nothing saved. Returns fresh lists on every call,
+    because callers keep the result and edit it in place."""
+    def bank(labels):
+        return [{"key": k, "label": label} for k, label in zip(TEMPLATE_KEYS, labels)]
+    return {
+        "players": [],
+        "plays":   bank(SPORT_PLAY_TEMPLATES.get(sport_key, [])),
+        "ratings": bank(SPORT_RATING_TEMPLATES.get(sport_key, ["GOOD", "MISS"])),
+    }
 
 # ── Brand colors  (#8c2232 crimson, #dbcca6 tan) ─────────────────────────────
 def _parse_hex(hex_str: str):
@@ -2744,6 +2773,11 @@ class TagWindowV2:
         cy      = self._sc_cy
         TOTAL_W = self._sc_total_w
         CARD_H  = self._sc_card_h
+        # The window may have been laid out since the first build. Pills are sized from
+        # _effective_card_w, so the card must match it or the right-hand pills get cut off.
+        if hasattr(self, "_effective_card_w") and hasattr(self, "_now_card"):
+            TOTAL_W = self._effective_card_w
+            cx      = self._now_card.frame().origin.x
 
         for card in list(self._sc_cards.values()):
             card.removeFromSuperview()
@@ -5061,7 +5095,7 @@ class TagWindowV2:
             import copy
             sc_data = self.app._shortcuts_data
             if target_sport not in sc_data:
-                sc_data[target_sport] = {}
+                sc_data[target_sport] = default_shortcuts(target_sport)
             sc_data[target_sport][step_id] = copy.deepcopy(items)
             self.app._save_shortcuts()
             target_label = SPORTS[target_sport]["label"].split("  ", 1)[-1].strip()
@@ -8208,7 +8242,7 @@ class BasketballRenamerApp(rumps.App):
         raw                   = load_json(SHORTCUTS_FILE, {})
         self._shortcuts_data  = self._migrate_shortcuts(raw)
         sport                 = self.session.get("sport", "MBB")
-        self.shortcuts        = dict(self._shortcuts_data.get(sport, DEFAULT_SHORTCUTS))
+        self.shortcuts        = dict(self._shortcuts_data.get(sport) or default_shortcuts(sport))
         self._shortcuts_data[sport] = self.shortcuts
         self._session_start_ts = datetime.now().isoformat()
         self._build_menu()
@@ -8317,7 +8351,7 @@ class BasketballRenamerApp(rumps.App):
         self._build_menu()
 
         # Load this sport's shortcuts (all banks), falling back to defaults
-        new_sc = dict(self._shortcuts_data.get(sport_key, DEFAULT_SHORTCUTS))
+        new_sc = dict(self._shortcuts_data.get(sport_key) or default_shortcuts(sport_key))
 
         # Overlay the cached roster for the new sport's players bank
         cache = load_json(ROSTERS_FILE, {})
