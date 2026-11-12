@@ -169,6 +169,8 @@ DEFAULT_SETTINGS = {
     "sound_on_rename":         False,
     # Undo
     "undo_stack_size":         50,
+    # Onboarding
+    "seen_tutorial":           False,
 }
 
 # Maps athletics site URL slugs to internal sport codes
@@ -1084,6 +1086,7 @@ MainCaller    = None
 FileListDelegate     = None
 NamingClipsDelegate  = None
 NamingClipsTable     = None
+TutorialOverlay      = None
 QLDataSource         = None
 SearchResultsDelegate = None
 SearchResultsTable = None
@@ -1099,7 +1102,7 @@ NowCardResizer       = None
 CardHeightResizer    = None
 
 def make_objc_classes():
-    global _classes_made, KeyTableView, NavItemView, ActionButton, PillButton, MenuTarget, MainCaller, FileListDelegate, NamingClipsDelegate, NamingClipsTable, QLDataSource, SearchResultsDelegate, SearchResultsTable, HoverButton, add_hover_highlight, clear_hover_highlight, hover_press_down, hover_press_up, hover_dip, WindowDelegate, FilePanelResizer, NowCardResizer, CardHeightResizer
+    global _classes_made, KeyTableView, NavItemView, ActionButton, PillButton, MenuTarget, MainCaller, FileListDelegate, NamingClipsDelegate, NamingClipsTable, QLDataSource, SearchResultsDelegate, SearchResultsTable, HoverButton, add_hover_highlight, clear_hover_highlight, hover_press_down, hover_press_up, hover_dip, WindowDelegate, FilePanelResizer, NowCardResizer, CardHeightResizer, TutorialOverlay
     if _classes_made:
         return
     _classes_made = True
@@ -1794,16 +1797,153 @@ def make_objc_classes():
 
     CardHeightResizer = _CardHeightResizer
 
+    # ── Tutorial overlay ──────────────────────────────────────────────────────
+    class _TutorialOverlay(NSView):
+        """Full-window dim + spotlight cutout + step card for first-run tutorial."""
+
+        def initWithFrame_(self, frame):
+            self = objc.super(_TutorialOverlay, self).initWithFrame_(frame)
+            if self is None:
+                return None
+            self._spotlight_rect = None   # NSRect of the highlighted region (window coords)
+            self._card = None             # the step card NSView
+            self.setWantsLayer_(True)
+            self.layer().setZPosition_(9999)
+            return self
+
+        def acceptsFirstMouse_(self, event):
+            return True
+
+        def mouseDown_(self, event):
+            # Clicks outside the spotlight are eaten (no pass-through)
+            pass
+
+        # ----- drawing -----
+        def drawRect_(self, dirty):
+            from AppKit import NSColor, NSBezierPath, NSRectFill, NSGraphicsContext
+            import Quartz
+            ctx = NSGraphicsContext.currentContext().CGContext()
+            bounds = self.bounds()
+            # Dark scrim
+            Quartz.CGContextSetRGBFillColor(ctx, 0, 0, 0, 0.62)
+            Quartz.CGContextFillRect(ctx, bounds)
+            # Spotlight cutout — clear the highlighted rect
+            sr = self._spotlight_rect
+            if sr is not None:
+                Quartz.CGContextSetBlendMode(ctx, Quartz.kCGBlendModeClear)
+                r = 10.0
+                Quartz.CGContextBeginPath(ctx)
+                Quartz.CGContextMoveToPoint(ctx, sr.origin.x + r, sr.origin.y)
+                Quartz.CGContextAddArcToPoint(ctx, sr.origin.x + sr.size.width, sr.origin.y, sr.origin.x + sr.size.width, sr.origin.y + sr.size.height, r)
+                Quartz.CGContextAddArcToPoint(ctx, sr.origin.x + sr.size.width, sr.origin.y + sr.size.height, sr.origin.x, sr.origin.y + sr.size.height, r)
+                Quartz.CGContextAddArcToPoint(ctx, sr.origin.x, sr.origin.y + sr.size.height, sr.origin.x, sr.origin.y, r)
+                Quartz.CGContextAddArcToPoint(ctx, sr.origin.x, sr.origin.y, sr.origin.x + sr.size.width, sr.origin.y, r)
+                Quartz.CGContextClosePath(ctx)
+                Quartz.CGContextFillPath(ctx)
+                Quartz.CGContextSetBlendMode(ctx, Quartz.kCGBlendModeNormal)
+
+        def setSpotlightRect_cardTitle_body_step_total_onNext_onSkip_(
+                self, rect, title, body, step, total, next_cb, skip_cb):
+            from AppKit import (NSView, NSTextField, NSFont, NSColor,
+                                NSMakeRect, NSMakeSize, NSTextAlignment)
+            self._spotlight_rect = rect
+            self.setNeedsDisplay_(True)
+
+            # Remove old card
+            if self._card is not None:
+                self._card.removeFromSuperview()
+
+            CARD_W  = 340.0
+            CARD_H  = 190.0
+            PAD     = 20.0
+            bounds  = self.bounds()
+
+            # Position card below spotlight (or above if near bottom)
+            if rect is not None:
+                cx = rect.origin.x + rect.size.width / 2 - CARD_W / 2
+                # Try below
+                card_y = rect.origin.y - CARD_H - 16
+                if card_y < 20:
+                    card_y = rect.origin.y + rect.size.height + 16
+            else:
+                cx = (bounds.size.width - CARD_W) / 2
+                card_y = (bounds.size.height - CARD_H) / 2
+
+            cx = max(16, min(cx, bounds.size.width - CARD_W - 16))
+            card_y = max(16, min(card_y, bounds.size.height - CARD_H - 16))
+
+            card = NSView.alloc().initWithFrame_(NSMakeRect(cx, card_y, CARD_W, CARD_H))
+            card.setWantsLayer_(True)
+            card.layer().setBackgroundColor_(_hex_color("#1c1c1e").CGColor())
+            card.layer().setCornerRadius_(14.0)
+            card.layer().setBorderWidth_(0.5)
+            card.layer().setBorderColor_(_hex_color_alpha("#ffffff", 0.15).CGColor())
+
+            # Step dots
+            DOT_R = 4.0
+            dot_spacing = 12.0
+            dots_total_w = total * DOT_R * 2 + (total - 1) * (dot_spacing - DOT_R * 2)
+            dot_x = (CARD_W - dots_total_w) / 2
+            dot_y = CARD_H - PAD - DOT_R * 2
+            for i in range(total):
+                dot = NSView.alloc().initWithFrame_(NSMakeRect(dot_x, dot_y, DOT_R * 2, DOT_R * 2))
+                dot.setWantsLayer_(True)
+                dot.layer().setCornerRadius_(DOT_R)
+                if i == step - 1:
+                    dot.layer().setBackgroundColor_(_hex_color(COLOR_CRIMSON).CGColor())
+                else:
+                    dot.layer().setBackgroundColor_(_hex_color_alpha("#ffffff", 0.25).CGColor())
+                card.addSubview_(dot)
+                dot_x += dot_spacing
+
+            # Title
+            title_lbl = NSTextField.labelWithString_(title)
+            title_lbl.setFont_(NSFont.boldSystemFontOfSize_(15))
+            title_lbl.setTextColor_(NSColor.labelColor())
+            title_lbl.setFrame_(NSMakeRect(PAD, dot_y - 8 - 20, CARD_W - PAD * 2, 20))
+            card.addSubview_(title_lbl)
+
+            # Body
+            body_lbl = NSTextField.wrappingLabelWithString_(body)
+            body_lbl.setFont_(NSFont.systemFontOfSize_(13))
+            body_lbl.setTextColor_(NSColor.secondaryLabelColor())
+            body_lbl.setFrame_(NSMakeRect(PAD, dot_y - 8 - 20 - 52, CARD_W - PAD * 2, 52))
+            card.addSubview_(body_lbl)
+
+            # Buttons
+            BTN_H  = 32.0
+            BTN_W  = 110.0
+            SKIP_W = 60.0
+            btn_y  = PAD
+
+            next_btn = ActionButton.alloc().initWithFrame_(
+                NSMakeRect(CARD_W - PAD - BTN_W, btn_y, BTN_W, BTN_H))
+            next_lbl = "Finish" if step == total else "Next  →"
+            next_btn.configureTitle_bg_press_action_(
+                next_lbl, COLOR_CRIMSON, "#6b1a26", next_cb)
+            card.addSubview_(next_btn)
+
+            skip_btn = ActionButton.alloc().initWithFrame_(
+                NSMakeRect(CARD_W - PAD - BTN_W - 10 - SKIP_W, btn_y, SKIP_W, BTN_H))
+            skip_btn.configureTitle_bg_press_action_(
+                "Skip", "#2c2c2e", "#232325", skip_cb)
+            card.addSubview_(skip_btn)
+
+            self.addSubview_(card)
+            self._card = card
+
+    TutorialOverlay = _TutorialOverlay
+
 # ── Tag Window v2 (Adobe-CC inspired redesign) ───────────────────────────────
 
 class TagWindowV2:
     NAV_ITEMS = [
+        ("session",  "pencil",                    "Naming"),
         ("tag",      "bolt.fill",                "Log Mode"),
         ("players",  "person.2.fill",            "Team"),
+        (None, None, None),
         ("labels",   "list.bullet",              "Labels"),
         ("stats",    "chart.bar.fill",           "Stats"),
-        (None, None, None),
-        ("session",  "pencil",                    "Naming"),
         ("settings", "slider.horizontal.3",      "Settings"),
         ("help",     "questionmark.circle.fill", "Help"),
     ]
@@ -1822,7 +1962,7 @@ class TagWindowV2:
         self.shortcuts = shortcuts
         self.app       = app
         self.nav_items = {}
-        self.current_section = "tag"
+        self.current_section = "session"
         self._sidebar_visible   = True
         self._file_list_visible = True
         self._now_left_ratio    = 0.60               # left-column fraction in now-tagging card
@@ -2012,7 +2152,7 @@ class TagWindowV2:
             self.nav_items[key] = item
             item_y -= 40
 
-        self.nav_items["tag"].setSelected_(True)
+        self.nav_items["session"].setSelected_(True)
 
         # ── Top bar ───────────────────────────────────────────────────────────
         TOP_H = 56
@@ -4182,6 +4322,7 @@ class TagWindowV2:
         url_btn.setAutoresizingMask_(1 | 8)
         section.addSubview_(url_btn)
         self._url_btn = url_btn
+        self._tutorial_url_btn = url_btn
 
         # Status label — shows progress/result of last fetch
         self._roster_status_lbl = NSTextField.labelWithString_("")
@@ -5784,6 +5925,7 @@ class TagWindowV2:
         choose_btn.configureTitle_bg_press_action_(
             "Choose Folder…", "#3a3a3c", "#2c2c2e", self._session_choose_folder)
         row_bg.addSubview_(choose_btn)
+        self._tutorial_folder_row = row_bg
 
         # Store form metrics for convention builder to reuse
         self._conv_form_w = FORM_W
@@ -5797,6 +5939,7 @@ class TagWindowV2:
         conv_sv.setDrawsBackground_(False)
         section.addSubview_(conv_sv)
         self._convention_sv = conv_sv
+        self._tutorial_convention_sv = conv_sv
 
         self._build_convention_ui(section, layout_w)
         self._build_naming_clips_panel(section, cw, ch)
@@ -7754,7 +7897,7 @@ class TagWindowV2:
 
         # Calculate total content height.
         # Each make_* helper subtracts ROW_H + ROW_GAP (including the last row), so budget n gaps per group.
-        rows_per_group = [5, 3, 2, 2, 2, 4, 1]  # Log, Rename, Display, Stats, Roster, System, Undo
+        rows_per_group = [5, 3, 2, 2, 2, 4, 1, 1]  # Log, Rename, Display, Stats, Roster, System, Undo, Onboarding
         total_h = TOP_PAD + BTM_PAD
         for n in rows_per_group:
             total_h += HDR_H + 8 + n * ROW_H + n * ROW_GAP
@@ -8037,9 +8180,124 @@ class TagWindowV2:
                      "Maximum number of rename operations that can be undone.",
                      10, 200)
 
+        section_gap()
+
+        # ── ONBOARDING ──────────────────────────────────────────────────────
+        make_header("Onboarding")
+        y  = _y[0] - ROW_H
+        bg = _row_bg(y)
+        _row_labels(bg, "Replay tutorial", "Walk through the first-time setup guide again.", 160)
+        replay_btn = ActionButton.alloc().initWithFrame_(
+            NSMakeRect(row_w - 160 - 16, (ROW_H - BTN_H) / 2, 160, BTN_H))
+        replay_btn.configureTitle_bg_press_action_(
+            "Replay Tutorial", "#3a3a3c", "#2c2c2e",
+            lambda: (self._dismiss_tutorial(), self._start_tutorial()))
+        bg.addSubview_(replay_btn)
+        _y[0] = y - ROW_GAP
+
         # Scroll to top
         sv.contentView().scrollToPoint_((0, max(0.0, doc_h - SCROLL_H)))
         sv.reflectScrolledClipView_(sv.contentView())
+
+    # ── Tutorial ──────────────────────────────────────────────────────────────
+
+    TUTORIAL_STEPS = [
+        {
+            "tab":     None,
+            "title":   "Welcome to EZ Logger",
+            "body":    "Let's get you set up in about a minute. You can skip this at any time.",
+            "ref":     None,
+            "pad":     0,
+        },
+        {
+            "tab":     "session",
+            "title":   "Choose your footage folder",
+            "body":    "Pick the folder where your video clips live. EZ Logger reads and renames files here.",
+            "ref":     "_tutorial_folder_row",
+            "pad":     8,
+        },
+        {
+            "tab":     "session",
+            "title":   "Set up your naming convention",
+            "body":    "Build how you want your files named. Add fields for text, metadata, opponent and more. The preview at the bottom updates live.",
+            "ref":     "_tutorial_convention_sv",
+            "pad":     12,
+        },
+        {
+            "tab":     "players",
+            "title":   "Add your team roster",
+            "body":    "Paste your school's athletics roster URL and tap Fetch, or add players manually with + Add Player.",
+            "ref":     "_tutorial_url_btn",
+            "pad":     12,
+        },
+        {
+            "tab":     "tag",
+            "title":   "You're all set",
+            "body":    "Head to Log Mode to start tagging clips. Select a file, pick a player, then press Enter to log it.",
+            "ref":     None,
+            "pad":     0,
+        },
+    ]
+
+    def _start_tutorial(self):
+        from AppKit import NSView, NSMakeRect
+        cv = self.win.contentView()
+        bounds = cv.bounds()
+        overlay = TutorialOverlay.alloc().initWithFrame_(bounds)
+        overlay.setAutoresizingMask_(2 | 4 | 8 | 16)
+        cv.addSubview_(overlay)
+        self._tutorial_overlay = overlay
+        self._tutorial_step = 0
+        self._show_tutorial_step(0)
+
+    def _show_tutorial_step(self, idx):
+        from AppKit import NSMakeRect
+        steps = self.TUTORIAL_STEPS
+        if idx >= len(steps):
+            self._dismiss_tutorial()
+            return
+        step = steps[idx]
+        total = len(steps)
+
+        # Switch to the step's tab
+        if step["tab"] is not None:
+            self._on_nav_select(step["tab"])
+
+        # Compute spotlight rect in overlay (window content-view) coords
+        spotlight = None
+        ref_name = step["ref"]
+        if ref_name and hasattr(self, ref_name):
+            view = getattr(self, ref_name)
+            # Convert view bounds to window content-view coords
+            vb = view.bounds()
+            origin = view.convertPoint_toView_((vb.origin.x, vb.origin.y), None)
+            # None means convert to window base coords; content view IS the base
+            pad = step["pad"]
+            spotlight = NSMakeRect(
+                origin.x - pad,
+                origin.y - pad,
+                vb.size.width + pad * 2,
+                vb.size.height + pad * 2,
+            )
+
+        self._tutorial_overlay.setSpotlightRect_cardTitle_body_step_total_onNext_onSkip_(
+            spotlight,
+            step["title"],
+            step["body"],
+            idx + 1,
+            total,
+            lambda: self._show_tutorial_step(idx + 1),
+            self._dismiss_tutorial,
+        )
+
+    def _dismiss_tutorial(self):
+        overlay = getattr(self, "_tutorial_overlay", None)
+        if overlay is not None:
+            overlay.removeFromSuperview()
+            self._tutorial_overlay = None
+        _save_setting("seen_tutorial", True)
+        if hasattr(self, "_settings"):
+            self._settings["seen_tutorial"] = True
 
     def _make_toggle_cb(self, key):
         """Return a stable callback for a settings toggle button (special cases included)."""
@@ -8484,6 +8742,14 @@ class TagWindowV2:
         from AppKit import NSApplication
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
         self.win.makeKeyAndOrderFront_(None)
+        # First-run tutorial — show after a short delay so the window renders first
+        if not self._settings.get("seen_tutorial", False):
+            import rumps as _rumps
+            _rumps.Timer(self._auto_start_tutorial, 0.6).start()
+
+    def _auto_start_tutorial(self, timer):
+        timer.stop()
+        self._start_tutorial()
 
 
 # ── Menubar App ───────────────────────────────────────────────────────────────
