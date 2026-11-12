@@ -1054,6 +1054,7 @@ MenuTarget    = None
 MainCaller    = None
 FileListDelegate     = None
 NamingClipsDelegate  = None
+NamingClipsTable     = None
 QLDataSource         = None
 SearchResultsDelegate = None
 SearchResultsTable = None
@@ -1069,7 +1070,7 @@ NowCardResizer       = None
 CardHeightResizer    = None
 
 def make_objc_classes():
-    global _classes_made, KeyTableView, NavItemView, ActionButton, PillButton, MenuTarget, MainCaller, FileListDelegate, NamingClipsDelegate, QLDataSource, SearchResultsDelegate, SearchResultsTable, HoverButton, add_hover_highlight, clear_hover_highlight, hover_press_down, hover_press_up, hover_dip, WindowDelegate, FilePanelResizer, NowCardResizer, CardHeightResizer
+    global _classes_made, KeyTableView, NavItemView, ActionButton, PillButton, MenuTarget, MainCaller, FileListDelegate, NamingClipsDelegate, NamingClipsTable, QLDataSource, SearchResultsDelegate, SearchResultsTable, HoverButton, add_hover_highlight, clear_hover_highlight, hover_press_down, hover_press_up, hover_dip, WindowDelegate, FilePanelResizer, NowCardResizer, CardHeightResizer
     if _classes_made:
         return
     _classes_made = True
@@ -1480,6 +1481,38 @@ def make_objc_classes():
                 self.owner._on_naming_selection_changed()
 
     NamingClipsDelegate = _NamingClipsDelegate
+
+    class _NamingClipsTable(NSTableView):
+        owner = None
+
+        def acceptsFirstResponder(self):
+            return True
+
+        def mouseDown_(self, event):
+            point = self.convertPoint_fromView_(event.locationInWindow(), None)
+            row   = self.rowAtPoint_(point)
+            objc.super(_NamingClipsTable, self).mouseDown_(event)
+            if self.owner and 0 <= row < len(self.owner._files):
+                self.owner._on_naming_row_clicked(row)
+
+        def keyDown_(self, event):
+            chars    = event.characters() or ""
+            key_code = event.keyCode()
+            if chars == " ":
+                if self.owner:
+                    self.owner._naming_quicklook()
+                return
+            if chars == "\x1b":   # ESC
+                close_quicklook()
+                return
+            is_arrow = key_code in (125, 126)   # down=125, up=126
+            objc.super(_NamingClipsTable, self).keyDown_(event)
+            if is_arrow and self.owner:
+                row = self.selectedRow()
+                if 0 <= row < len(self.owner._files):
+                    self.owner._on_naming_row_clicked(row)
+
+    NamingClipsTable = _NamingClipsTable
 
     class _SearchResultsDelegate(NSObject):
         owner = None
@@ -2285,6 +2318,8 @@ class TagWindowV2:
             self.win.makeFirstResponder_(self._file_list_table)
         if is_session:
             self._refresh_files()
+            if hasattr(self, "_naming_clips_table"):
+                self.win.makeFirstResponder_(self._naming_clips_table)
         if hasattr(self, "_now_card"):
             self._now_card.setHidden_(not is_tag)
         if hasattr(self, "_now_card_h_resizer"):
@@ -5749,9 +5784,38 @@ class TagWindowV2:
             return cw
         return cw - self.NAMING_CLIPS_W - 24.0
 
+    def _naming_panel_pos(self, panel_h):
+        """Return layout positions for all elements in the naming clips panel."""
+        PANEL_W  = self.NAMING_CLIPS_W
+        THUMB_W  = PANEL_W - 28.0
+        THUMB_H  = round(THUMB_W * 9.0 / 16.0)   # 16:9
+        PAD      = 10.0
+        BTN_H    = 26.0
+        GAP      = 6.0
+        TITLE_H  = 18.0
+        STATUS_H = 34.0
+        show_thumb = panel_h >= 360.0
+        clear_y   = PAD
+        preview_y = clear_y + BTN_H + GAP
+        scroll_y  = preview_y + BTN_H + GAP
+        title_y   = panel_h - PAD - TITLE_H
+        status_y  = title_y - GAP - STATUS_H
+        if show_thumb:
+            thumb_y   = status_y - GAP - THUMB_H
+            scroll_top = thumb_y - GAP
+        else:
+            thumb_y    = None
+            scroll_top = status_y - GAP
+        scroll_h = max(30.0, scroll_top - scroll_y)
+        return dict(clear_y=clear_y, preview_y=preview_y, scroll_y=scroll_y,
+                    scroll_h=scroll_h, title_y=title_y, status_y=status_y,
+                    show_thumb=show_thumb, thumb_y=thumb_y, thumb_h=THUMB_H,
+                    thumb_w=THUMB_W, title_h=TITLE_H, status_h=STATUS_H,
+                    btn_h=BTN_H)
+
     def _build_naming_clips_panel(self, section, cw, ch):
         from AppKit import (
-            NSView, NSScrollView, NSTableColumn, NSTableView,
+            NSView, NSScrollView, NSTableColumn, NSImageView, NSImage,
             NSTextField, NSFont, NSColor, NSMakeRect,
         )
         PANEL_W = self.NAMING_CLIPS_W
@@ -5767,40 +5831,87 @@ class TagWindowV2:
         section.addSubview_(panel)
         self._naming_clips_panel = panel
 
+        pos = self._naming_panel_pos(panel_h)
+
         title = NSTextField.labelWithString_("CLIPS")
         title.setFont_(NSFont.boldSystemFontOfSize_(13))
         title.setTextColor_(_hex_color(COLOR_TAN))
-        title.setFrame_(NSMakeRect(14, panel_h - 28, PANEL_W - 28, 18))
-        title.setAutoresizingMask_(8)
+        title.setFrame_(NSMakeRect(14, pos['title_y'], PANEL_W - 28, pos['title_h']))
         panel.addSubview_(title)
+        self._naming_clips_title = title
 
         status = NSTextField.wrappingLabelWithString_("")
         status.setFont_(NSFont.systemFontOfSize_(11))
         status.setTextColor_(NSColor.secondaryLabelColor())
-        status.setFrame_(NSMakeRect(14, panel_h - 66, PANEL_W - 28, 34))
-        status.setAutoresizingMask_(8)
+        status.setFrame_(NSMakeRect(14, pos['status_y'], PANEL_W - 28, pos['status_h']))
         panel.addSubview_(status)
         self._naming_clips_status = status
 
-        CLEAR_H = 26.0
+        # ── Thumbnail container (shows frame of the clicked clip) ─────────────
+        THUMB_W, THUMB_H = pos['thumb_w'], pos['thumb_h']
+        thumb_cont = NSView.alloc().initWithFrame_(
+            NSMakeRect(14, pos['thumb_y'] or 0, THUMB_W, THUMB_H))
+        thumb_cont.setWantsLayer_(True)
+        thumb_cont.layer().setCornerRadius_(6.0)
+        thumb_cont.layer().setBackgroundColor_(_hex_color("#1a1a1c").CGColor())
+        thumb_cont.layer().setBorderWidth_(0.5)
+        thumb_cont.layer().setBorderColor_(
+            _hex_color_alpha("#ffffff", 0.10).CGColor())
+        thumb_cont.setHidden_(not pos['show_thumb'])
+        panel.addSubview_(thumb_cont)
+        self._naming_thumb_cont = thumb_cont
+
+        icon_sz = 32
+        thumb_icon = NSImageView.alloc().initWithFrame_(
+            NSMakeRect((THUMB_W - icon_sz) / 2, (THUMB_H - icon_sz) / 2,
+                       icon_sz, icon_sz))
+        sym = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            "play.rectangle.fill", None)
+        if sym:
+            thumb_icon.setImage_(sym)
+        thumb_icon.setContentTintColor_(NSColor.tertiaryLabelColor())
+        thumb_cont.addSubview_(thumb_icon)
+        self._naming_thumb_icon = thumb_icon
+
+        thumb_img = NSImageView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, THUMB_W, THUMB_H))
+        thumb_img.setImageScaling_(0)   # NSImageScaleProportionallyDown
+        thumb_img.setWantsLayer_(True)
+        thumb_img.layer().setCornerRadius_(6.0)
+        thumb_img.layer().setMasksToBounds_(True)
+        thumb_img.setHidden_(True)
+        thumb_cont.addSubview_(thumb_img)
+        self._naming_thumb_img  = thumb_img
+        self._naming_thumb_path = None   # staleness guard
+
+        # ── Buttons ───────────────────────────────────────────────────────────
+        BTN_H = pos['btn_h']
+        preview_btn = ActionButton.alloc().initWithFrame_(
+            NSMakeRect(14, pos['preview_y'], PANEL_W - 28, BTN_H))
+        preview_btn.configureTitle_bg_press_action_(
+            "Quick Look", "#3a3a3c", "#2c2c2e", self._naming_quicklook)
+        preview_btn.setHidden_(True)
+        panel.addSubview_(preview_btn)
+        self._naming_preview_btn = preview_btn
+
         clear_btn = ActionButton.alloc().initWithFrame_(
-            NSMakeRect(14, 10, PANEL_W - 28, CLEAR_H))
+            NSMakeRect(14, pos['clear_y'], PANEL_W - 28, BTN_H))
         clear_btn.configureTitle_bg_press_action_(
             "Clear Selection", "#3a3a3c", "#2c2c2e", self._naming_clear_selection)
         panel.addSubview_(clear_btn)
         self._naming_clear_btn = clear_btn
 
-        scroll_y = 10 + CLEAR_H + 8
-        scroll_h = panel_h - 72 - scroll_y
+        # ── Clip list ─────────────────────────────────────────────────────────
         scroll = NSScrollView.alloc().initWithFrame_(
-            NSMakeRect(0, scroll_y, PANEL_W, scroll_h))
+            NSMakeRect(0, pos['scroll_y'], PANEL_W, pos['scroll_h']))
         scroll.setHasVerticalScroller_(True)
         scroll.setAutohidesScrollers_(True)
         scroll.setDrawsBackground_(False)
-        scroll.setAutoresizingMask_(16)
         panel.addSubview_(scroll)
+        self._naming_clips_scroll = scroll
 
-        table = NSTableView.alloc().initWithFrame_(NSMakeRect(0, 0, PANEL_W, scroll_h))
+        table = NamingClipsTable.alloc().initWithFrame_(
+            NSMakeRect(0, 0, PANEL_W, pos['scroll_h']))
         table.setBackgroundColor_(_hex_color("#252528"))
         table.setRowHeight_(26)
         table.setGridStyleMask_(0)
@@ -5808,6 +5919,7 @@ class TagWindowV2:
         table.setHeaderView_(None)
         table.setAllowsMultipleSelection_(True)
         table.setAllowsEmptySelection_(True)
+        table.owner = self
 
         col = NSTableColumn.alloc().initWithIdentifier_("name")
         col.setWidth_(PANEL_W - 20)
@@ -5820,6 +5932,7 @@ class TagWindowV2:
         table.setDataSource_(self._naming_clips_delegate)
         table.setDelegate_(self._naming_clips_delegate)
         self._naming_clips_table = table
+        self._naming_focused_row = -1
         self._refresh_naming_clips()
 
     def _refresh_naming_clips(self):
@@ -5869,6 +5982,115 @@ class TagWindowV2:
             self._batch_btn.configureTitle_bg_press_action_(
                 title, "#8c2232", "#6b1a26", self._on_batch_rename)
 
+    def _reposition_naming_clips_panel_internals(self, panel_h):
+        """Reframe all subviews inside the naming clips panel after a resize."""
+        if not hasattr(self, "_naming_clips_title"):
+            return
+        from AppKit import NSMakeRect
+        PANEL_W = self.NAMING_CLIPS_W
+        pos = self._naming_panel_pos(panel_h)
+        self._naming_clips_title.setFrame_(
+            NSMakeRect(14, pos['title_y'], PANEL_W - 28, pos['title_h']))
+        self._naming_clips_status.setFrame_(
+            NSMakeRect(14, pos['status_y'], PANEL_W - 28, pos['status_h']))
+        if hasattr(self, "_naming_thumb_cont"):
+            show = pos['show_thumb']
+            self._naming_thumb_cont.setHidden_(not show)
+            if show and pos['thumb_y'] is not None:
+                self._naming_thumb_cont.setFrame_(
+                    NSMakeRect(14, pos['thumb_y'], pos['thumb_w'], pos['thumb_h']))
+        if hasattr(self, "_naming_preview_btn"):
+            self._naming_preview_btn.setFrame_(
+                NSMakeRect(14, pos['preview_y'], PANEL_W - 28, pos['btn_h']))
+        if hasattr(self, "_naming_clear_btn"):
+            self._naming_clear_btn.setFrame_(
+                NSMakeRect(14, pos['clear_y'], PANEL_W - 28, pos['btn_h']))
+        if hasattr(self, "_naming_clips_scroll"):
+            self._naming_clips_scroll.setFrame_(
+                NSMakeRect(0, pos['scroll_y'], PANEL_W, pos['scroll_h']))
+
+    def _on_naming_row_clicked(self, row):
+        """Load thumbnail for the clicked row and show the Quick Look button."""
+        self._naming_focused_row = row
+        if not (0 <= row < len(self._files)):
+            return
+        path = self._files[row]
+        if hasattr(self, "_naming_preview_btn"):
+            self._naming_preview_btn.setHidden_(False)
+        if not hasattr(self, "_naming_thumb_cont"):
+            return
+        self._naming_thumb_path = str(path)
+        if hasattr(self, "_naming_thumb_img"):
+            self._naming_thumb_img.setHidden_(True)
+        if hasattr(self, "_naming_thumb_icon"):
+            self._naming_thumb_icon.setHidden_(False)
+        import threading
+        threading.Thread(target=self._load_naming_thumb, args=(path,), daemon=True).start()
+
+    def _load_naming_thumb(self, path):
+        """Background: generate a thumbnail for the naming panel preview."""
+        try:
+            import AVFoundation, CoreMedia
+            from Foundation import NSURL, NSMutableData
+            import threading as _threading
+            url   = NSURL.fileURLWithPath_(str(path))
+            asset = AVFoundation.AVURLAsset.URLAssetWithURL_options_(url, None)
+            gen   = AVFoundation.AVAssetImageGenerator.assetImageGeneratorWithAsset_(asset)
+            gen.setAppliesPreferredTrackTransform_(True)
+            gen.setRequestedTimeToleranceBefore_(CoreMedia.CMTimeMakeWithSeconds(2.0, 600))
+            gen.setRequestedTimeToleranceAfter_(CoreMedia.CMTimeMakeWithSeconds(2.0, 600))
+            req_time = CoreMedia.CMTimeMakeWithSeconds(1.0, 600)
+            done       = _threading.Event()
+            result_box = [None]
+
+            def _handler(cgimg, actual_time, error):
+                result_box[0] = cgimg
+                done.set()
+
+            gen.generateCGImageAsynchronouslyForTime_completionHandler_(req_time, _handler)
+            done.wait(timeout=10.0)
+            cgimg = result_box[0]
+            if not cgimg or getattr(self, "_naming_thumb_path", None) != str(path):
+                return
+            try:
+                from Quartz import (CGImageDestinationCreateWithData,
+                                    CGImageDestinationAddImage,
+                                    CGImageDestinationFinalize)
+            except ImportError:
+                from ImageIO import (CGImageDestinationCreateWithData,
+                                     CGImageDestinationAddImage,
+                                     CGImageDestinationFinalize)
+            data = NSMutableData.data()
+            dest = CGImageDestinationCreateWithData(data, "public.jpeg", 1, None)
+            if not dest:
+                return
+            CGImageDestinationAddImage(dest, cgimg, None)
+            if CGImageDestinationFinalize(dest) and len(data) > 0:
+                caller = MainCaller.alloc().init()
+                caller._cb = lambda d=data: self._render_naming_thumb_from_data(d)
+                caller.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "fire:", None, False)
+        except Exception:
+            pass
+
+    def _render_naming_thumb_from_data(self, data):
+        try:
+            from AppKit import NSImage
+            img = NSImage.alloc().initWithData_(data)
+            if img and hasattr(self, "_naming_thumb_img"):
+                self._naming_thumb_img.setImage_(img)
+                self._naming_thumb_img.setHidden_(False)
+                if hasattr(self, "_naming_thumb_icon"):
+                    self._naming_thumb_icon.setHidden_(True)
+        except Exception:
+            pass
+
+    def _naming_quicklook(self):
+        row = getattr(self, "_naming_focused_row", -1)
+        if 0 <= row < len(self._files):
+            close_quicklook()
+            quicklook(str(self._files[row]))
+
     def _session_choose_folder(self):
         folder = pick_folder_dialog()
         if folder:
@@ -5905,9 +6127,11 @@ class TagWindowV2:
             self._naming_clips_panel.setHidden_(panel_hidden)
             if panel_hidden:
                 self._naming_clear_selection()  # never filter by a selection the user can't see
+            new_panel_h = max(200.0, ch - HEADER_H - GAP - BOT_PAD)
             self._naming_clips_panel.setFrame_(NSMakeRect(
                 cw - self.NAMING_CLIPS_W - 12.0, BOT_PAD,
-                self.NAMING_CLIPS_W, max(200.0, ch - HEADER_H - GAP - BOT_PAD)))
+                self.NAMING_CLIPS_W, new_panel_h))
+            self._reposition_naming_clips_panel_internals(new_panel_h)
 
         if hasattr(self, "_folder_row"):
             self._folder_row.setFrame_(
