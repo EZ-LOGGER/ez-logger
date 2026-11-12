@@ -1597,6 +1597,7 @@ ActionButton  = None
 PillButton    = None
 MenuTarget    = None
 MainCaller    = None
+EmojiField    = None
 FileListDelegate     = None
 NamingClipsDelegate  = None
 NamingClipsTable     = None
@@ -1616,7 +1617,7 @@ NowCardResizer       = None
 CardHeightResizer    = None
 
 def make_objc_classes():
-    global _classes_made, KeyTableView, NavItemView, ActionButton, PillButton, MenuTarget, MainCaller, FileListDelegate, NamingClipsDelegate, NamingClipsTable, QLDataSource, SearchResultsDelegate, SearchResultsTable, HoverButton, add_hover_highlight, clear_hover_highlight, hover_press_down, hover_press_up, hover_dip, WindowDelegate, FilePanelResizer, NowCardResizer, CardHeightResizer, TutorialOverlay
+    global _classes_made, KeyTableView, NavItemView, ActionButton, PillButton, MenuTarget, MainCaller, FileListDelegate, NamingClipsDelegate, NamingClipsTable, QLDataSource, SearchResultsDelegate, SearchResultsTable, HoverButton, add_hover_highlight, clear_hover_highlight, hover_press_down, hover_press_up, hover_dip, WindowDelegate, FilePanelResizer, NowCardResizer, CardHeightResizer, TutorialOverlay, EmojiField
     if _classes_made:
         return
     _classes_made = True
@@ -1989,6 +1990,37 @@ def make_objc_classes():
                 cb()
 
     MainCaller = _MainCaller
+
+    class _EmojiField(NSTextField):
+        """Text field that opens the system emoji picker when clicked or tabbed into.
+        Its text is selected first, so the picked emoji replaces the old one."""
+        def becomeFirstResponder(self):
+            ok = objc.super(_EmojiField, self).becomeFirstResponder()
+            if ok:
+                # After the field editor is in place; modal mode so it fires inside an alert
+                self.performSelector_withObject_afterDelay_inModes_(
+                    "openEmojiPicker:", None, 0.0,
+                    ["NSDefaultRunLoopMode", "NSModalPanelRunLoopMode"])
+            return ok
+
+        def openEmojiPicker_(self, _):
+            ed = self.currentEditor()
+            if ed is not None:
+                ed.selectAll_(None)
+            from AppKit import NSApp
+            NSApp.orderFrontCharacterPalette_(None)
+
+        def textDidChange_(self, note):
+            objc.super(_EmojiField, self).textDidChange_(note)
+            # Keep one emoji: the newest pick
+            val = self.stringValue()
+            if val.length() > 1:
+                r = val.rangeOfComposedCharacterSequenceAtIndex_(val.length() - 1)
+                last = val.substringWithRange_(r)
+                if last != val:
+                    self.setStringValue_(last)
+
+    EmojiField = _EmojiField
 
     class _FileListDelegate(NSObject):
         owner = None
@@ -5134,7 +5166,7 @@ class TagWindowV2:
         info holds current values. Returns a dict, {"delete": True} for the
         Delete button, or None on Cancel."""
         from AppKit import (NSAlert, NSTextField, NSView, NSMakeRect, NSFont,
-                            NSPopUpButton, NSNotificationCenter)
+                            NSPopUpButton, NSNotificationCenter, NSColor)
         alert = NSAlert.alloc().init()
         alert.setMessageText_(title)
         alert.setInformativeText_(err or
@@ -5160,6 +5192,17 @@ class TagWindowV2:
                 pop = NSPopUpButton.alloc().initWithFrame_pullsDown_(
                     NSMakeRect(LBL_W - 3, y + 1, W - LBL_W + 3, 26), False)
                 fields[cap] = pop
+            elif cap == "Emoji":
+                # Click to open the emoji picker; a narrow box since it holds one emoji
+                tf = EmojiField.alloc().initWithFrame_(NSMakeRect(LBL_W, y + 3, 44, 24))
+                tf.setFont_(NSFont.systemFontOfSize_(15))
+                tf.setAlignment_(1)   # center
+                fields[cap] = tf
+                hint = NSTextField.labelWithString_("Click to choose")
+                hint.setFont_(NSFont.systemFontOfSize_(11))
+                hint.setTextColor_(NSColor.secondaryLabelColor())
+                hint.setFrame_(NSMakeRect(LBL_W + 52, y + 7, 160, 16))
+                panel.addSubview_(hint)
             else:
                 tf = NSTextField.alloc().initWithFrame_(NSMakeRect(LBL_W, y + 3, W - LBL_W, 24))
                 tf.setFont_(NSFont.systemFontOfSize_(13))
