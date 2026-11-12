@@ -795,3 +795,145 @@ def test_pick_selection_clamps_when_clip_is_gone():
 def test_pick_selection_empty_or_nothing_selected():
     assert renamer.pick_selection([], "a.mp4", {}, 0) == -1
     assert renamer.pick_selection(["a.mp4"], None, {}, -1) == -1
+
+
+# ── Per-sport steps, stats by step, custom sports ─────────────────────────────
+
+def _fresh_session(**extra):
+    s = {"sport": "MBB", "custom_steps": [{"id": "plays", "label": "Play"},
+                                          {"id": "ratings", "label": "Rating"}]}
+    s.update(extra)
+    return s
+
+
+def test_sport_steps_falls_back_to_legacy_list():
+    s = _fresh_session()
+    assert [x["id"] for x in renamer.sport_steps(s, "WBB")] == ["players", "plays", "ratings"]
+
+
+def test_own_sport_steps_changes_only_that_sport():
+    s = _fresh_session()
+    own = renamer.own_sport_steps(s, "MBB")
+    own.insert(2, {"id": "zone", "label": "Zone"})
+    assert [x["id"] for x in renamer.sport_steps(s, "MBB")] == ["players", "plays", "zone", "ratings"]
+    assert [x["id"] for x in renamer.sport_steps(s, "WBB")] == ["players", "plays", "ratings"]
+    assert s["custom_steps"] == [{"id": "plays", "label": "Play"}, {"id": "ratings", "label": "Rating"}]
+
+
+def test_stat_rows_player_first():
+    rows = renamer.stat_rows_for_segment(
+        ["SMITH", "LAYUP", "GOOD"], ["players", "plays", "ratings"],
+        ["players", "plays", "ratings"], {"plays": "Play", "ratings": "Rating"})
+    assert rows == [("SMITH", "LAYUP", "GOOD", {"Play": "LAYUP", "Rating": "GOOD"})]
+
+
+def test_stat_rows_skipped_step_and_extra_step():
+    order = ["players", "plays", "zone", "ratings"]
+    rows = renamer.stat_rows_for_segment(["SMITH", "PAINT", "GOOD"],
+                                         ["players", "zone", "ratings"], order)
+    assert rows[0][:3] == ("SMITH", "PAINT", "GOOD")
+    # Rating step skipped: the rating stays empty instead of taking the play
+    rows = renamer.stat_rows_for_segment(["SMITH", "LAYUP"], ["players", "plays"], order)
+    assert rows[0][:3] == ("SMITH", "LAYUP", "")
+
+
+def test_stat_rows_player_moved_and_multiple_players():
+    order = ["plays", "players", "ratings"]
+    rows = renamer.stat_rows_for_segment(
+        ["LAYUP", "SMITH", "JONES", "GOOD"], ["plays", "players", "players", "ratings"], order)
+    assert [r[:3] for r in rows] == [("SMITH", "LAYUP", "GOOD"), ("JONES", "LAYUP", "GOOD")]
+
+
+def test_stat_rows_player_off():
+    rows = renamer.stat_rows_for_segment(["SERVE", "ACE"], ["plays", "ratings"], ["plays", "ratings"])
+    assert rows[0][:3] == ("", "SERVE", "ACE")
+    assert renamer.stat_rows_for_segment([], [], ["plays"]) == []
+
+
+def test_custom_sport_registry_and_lookup():
+    try:
+        renamer.set_custom_sports([{"code": "mrug", "name": "Men's Rugby", "slug": "/mens-rugby/"},
+                                   {"code": "MBB", "name": "Clash"},
+                                   {"code": "MRUG", "name": "Dup"}])
+        sports = renamer.all_sports()
+        assert list(sports)[:len(renamer.SPORTS)] == list(renamer.SPORTS)
+        assert sports["MRUG"]["custom"] and sports["MRUG"]["name"] == "Men's Rugby"
+        assert sports["MRUG"]["emoji"] == renamer.DEFAULT_SPORT_EMOJI
+        assert renamer.sport_slug("MRUG") == "mens-rugby"
+        assert sports["MBB"]["custom"] is False
+        assert renamer.sport_slug("MSOC") == "mens-soccer"
+        assert renamer.sport_info("NOPE")["name"] == "NOPE"
+    finally:
+        renamer.set_custom_sports([])
+
+
+def test_suggest_and_validate_sport_code():
+    taken = set(renamer.SPORTS)
+    assert renamer.suggest_sport_code("Men's Rugby", taken) == "MRUG"
+    assert renamer.suggest_sport_code("Curling", taken) == "CURL"
+    assert renamer.suggest_sport_code("Men's Soccer", taken) == "MSOC2"
+    assert renamer.suggest_sport_code("", taken) == "SPORT"
+    assert renamer.validate_sport_code("MRUG", taken) == ""
+    assert renamer.validate_sport_code("MBB", taken)
+    assert renamer.validate_sport_code("toolong7", taken)
+    assert renamer.validate_sport_code("A B", taken)
+    assert renamer.validate_sport_code("", taken)
+
+
+def test_create_custom_sport_blank_and_copy():
+    try:
+        s = _fresh_session()
+        data = {"MBB": {"players": [{"key": "1", "label": "SMITH"}],
+                        "plays": [{"key": "a", "label": "LAYUP"}], "ratings": []}}
+        renamer.create_custom_sport(s, data, {"code": "CURL", "name": "Curling"})
+        assert [x["id"] for x in renamer.sport_steps(s, "CURL")] == ["players", "plays", "ratings"]
+        assert data["CURL"] == {"players": [], "plays": [], "ratings": []}
+        renamer.own_sport_steps(s, "MBB").insert(2, {"id": "zone", "label": "Zone"})
+        data["MBB"]["zone"] = [{"key": "z", "label": "PAINT"}]
+        renamer.create_custom_sport(s, data, {"code": "MB2", "name": "Copy"}, copy_from="MBB")
+        assert [x["id"] for x in renamer.sport_steps(s, "MB2")] == ["players", "plays", "zone", "ratings"]
+        assert data["MB2"]["players"] == []          # roster never copied
+        assert data["MB2"]["zone"] == [{"key": "z", "label": "PAINT"}]
+        data["MB2"]["zone"].append({"key": "y", "label": "WING"})
+        assert len(data["MBB"]["zone"]) == 1         # deep copy
+        assert set(renamer.all_sports()) >= {"CURL", "MB2"}
+    finally:
+        renamer.set_custom_sports([])
+
+
+def test_remove_and_update_custom_sport():
+    try:
+        s = _fresh_session(sport_presets={"CURL": [{"name": "x"}], "MBB": []})
+        data = {}
+        renamer.create_custom_sport(s, data, {"code": "CURL", "name": "Curling"})
+        assert renamer.update_custom_sport(s, "CURL", name="Ice Curling", emoji="", slug="/curling/")
+        info = renamer.sport_info("CURL")
+        assert (info["name"], info["emoji"], info["slug"]) == ("Ice Curling", renamer.DEFAULT_SPORT_EMOJI, "curling")
+        rosters, meta, keyp = {"CURL": [1], "MBB": [2]}, {"CURL": "t"}, {"CURL": []}
+        assert renamer.remove_custom_sport(s, data, rosters, meta, keyp, "CURL")
+        assert "CURL" not in renamer.all_sports()
+        assert "CURL" not in s["sport_steps"] and "CURL" not in data
+        assert rosters == {"MBB": [2]} and meta == {} and keyp == {}
+        assert s["sport_presets"] == {"MBB": []}
+        assert not renamer.remove_custom_sport(s, data, rosters, meta, keyp, "MBB")
+    finally:
+        renamer.set_custom_sports([])
+
+
+def test_stat_segments_split_and_skip_custom_text():
+    segs = renamer.stat_segments(["SMITH", "LAYUP", "NOTE", "JONES", "DUNK"],
+                                 ["players", "plays", "plays", "players", "plays"],
+                                 {2}, [3], ["players", "plays", "ratings"])
+    assert segs == [(["SMITH", "LAYUP"], ["players", "plays"]),
+                    (["JONES", "DUNK"], ["players", "plays"])]
+
+
+def test_stat_segments_share_steps_before_player():
+    order = ["plays", "players", "zone", "ratings"]
+    segs = renamer.stat_segments(["LAYUP", "SMITH", "JONES", "PAINT", "GOOD"],
+                                 ["plays", "players", "players", "zone", "ratings"],
+                                 set(), [2], order)
+    assert segs[1] == (["LAYUP", "JONES", "PAINT", "GOOD"],
+                       ["plays", "players", "zone", "ratings"])
+    rows = renamer.stat_rows_for_segment(*segs[1], order)
+    assert rows[0][:3] == ("JONES", "LAYUP_PAINT", "GOOD")

@@ -77,7 +77,7 @@ All paths are in `~`; constants are at the top of `renamer.py`.
 
 | File | Contents |
 |------|----------|
-| `.bball_renamer_v3_config.json` | Session, `naming_presets`, `sport_presets`, `active_preset`, `custom_steps` |
+| `.bball_renamer_v3_config.json` | Session, `naming_presets`, `sport_presets`, `active_preset`, `sport_steps`, `custom_sports`, and the frozen legacy `custom_steps` |
 | `.bball_renamer_v3_shortcuts.json` | `{sport_key: {bank_id: [{key, label, ...}]}}` |
 | `.bball_renamer_v3_settings.json` | All settings; `DEFAULT_SETTINGS` lists the keys |
 | `.bball_renamer_undo.json` | Undo stack, capped by the `undo_stack_size` setting (default 50) |
@@ -134,13 +134,20 @@ Presets live in two buckets: `naming_presets` (global, from `+ New` and `Dup`) a
 
 **Move to Trash:** `BasketballRenamerApp.trash_clips(paths, folder)` confirms with `_confirm_trash_alert` (Return is Cancel), calls `safe_trash` for each clip, drops their tag records and pushes a `{"type": "trash", "items": [{name, trash_path, record_before}]}` undo entry. `undo_last` sends that type to `_undo_trash`, and `undo_op_available` decides whether any entry can still be undone. The Naming tab's trash button acts on `trash_targets(files, _naming_selected, _rejected)`: the selection, else the rejects. ⌘⌫ in its Clips list acts on the selection only. `_refresh_files` rebuilds `_rejected` from tag records, and `_style_reject_cell` strikes those rows through in both file lists. A reject survives Batch Rename; logging the clip clears it.
 
+## Sports
+
+- `SPORTS` holds the built-ins. User sports live in `session["custom_sports"]` (`{code, name, emoji, slug}`) and are loaded into the module registry with `set_custom_sports` at launch. Look sports up with `sport_info(code)` / `all_sports()` / `sport_slug(code)`, never `SPORTS[...]`, or user sports break.
+- `create_custom_sport`, `update_custom_sport` and `remove_custom_sport` are the pure data operations; codes never change after creation (`suggest_sport_code`, `validate_sport_code`). Removing a sport drops its steps, banks, presets, roster cache and key presets; never stats or video files.
+- **Add Sport** (sport picker → `_start_add_sport`): step 1 `_sport_basics_form`, step 2 the Labels tab with `_labels_setup_bar` (Back/Cancel/Next via `_setup_back`, `_setup_cancel`, `_setup_next`), step 3 the summary alert. `self._sport_setup` is `{"code", "prev"}` while on step 2; `_end_sport_setup` hides the bar. The sport is saved at step 1, so quitting mid-setup keeps it. **Edit Sports…** appears only when a user sport exists.
+
 ## Steps and the logging state machine
 
-- `self._steps` is always `["players"] + [s["id"] for s in custom_steps]`. Shortcut banks are keyed by step ID.
-- `players` is the fixed first step and owns the roster, search and jersey logic.
-- After any structural step change, call `_apply_steps_change()`.
+- Steps are **per sport**: `sport_steps(session, sport)` returns `session["sport_steps"][sport]`, falling back to `[PLAYER_STEP] + custom_steps` (the old shared list, now frozen). Before changing a sport's steps, get its list with `own_sport_steps` (or `_own_step_list()`) so no other sport changes. Never edit `custom_steps`.
+- `self._steps` is the active sport's step IDs in order. Shortcut banks are keyed by step ID, per sport.
+- `players` owns the roster, search and jersey logic. It can sit anywhere in the order or be absent (turned off); never assume `self._steps[0] == "players"`. Logging starts at `self._steps[0]`; `_chain_to_player` jumps to the Player step's index and refuses when it's off.
+- After any structural step change, or a sport switch, call `_apply_steps_change()` (it cancels a log in progress).
 
-Tag state is the ordered `_tag_parts` list plus `_custom_indices` (typed text, excluded from stats) and `_chain_boundary_indices` (where each chained player starts). Reset them together on every start, cancel and finalize.
+Tag state is the ordered `_tag_parts` list plus the parallel `_tag_part_steps` (step ID each part was picked on), `_custom_indices` (typed text, excluded from stats) and `_chain_boundary_indices` (where each chained player starts). Reset them together on every start, cancel and finalize.
 
 Flow: `handle_key` → `_handle_shortcut_key_v2` → ENTER → `_advance_step_v2` → `_finalize_v2`.
 
@@ -156,7 +163,7 @@ Flow: `handle_key` → `_handle_shortcut_key_v2` → ENTER → `_advance_step_v2
 | X | `_toggle_reject_current`: marks or unmarks a reject, only when no step is active; marking moves to the next file |
 | ⌘⌫ | `_trash_current_clip`, only when no step is active. `KeyTableView.keyDown_` catches it, since `handle_key` gets no modifiers |
 
-- **Stats:** `_finalize_v2` calls `log_stat` once per chain segment, excluding custom text. Within a segment, player is `[0]`, rating is `[-1]`, and play is the middle parts joined.
+- **Stats:** by step identity, not position. `stat_segments` splits a clip at chain boundaries (dropping custom text, and sharing labels picked before Player with every chained player); `stat_rows_for_segment` gives one row per player: player from the Player step, rating from the sport's last non-player step, play from the other steps, plus a `steps` dict of per-step values stored by `log_stat`.
 - **Branches:** a shortcut's `children` open a sub-level through `_branch_stack` and `_branch_items`. The parent label is navigation only and is never added to the name. Nesting is one level deep. Search is off inside a branch.
 - **Search:** only on the player step, so other steps' keys always reach their shortcuts. Always toggle with `_apply_search_mode(on)`; never set `_search_enabled`, `_player_search_mode` or `_players_bypass_hotkeys` individually. Change matching rules in the `_matches` function inside `_update_search_display`.
 - **Finder colors:** a shortcut may hold `finder_color`, and a child without one uses its parent's. `_finalize_v2` applies colors after the rename. Non-color tags are always kept, a color failure never undoes the rename, and undo entries store `tags_before`.

@@ -183,6 +183,11 @@ SLUG_TO_CODE = {
     "womens-lacrosse":   "WLAX",
     "baseball":          "BASE",
     "softball":          "SB",
+    "mens-soccer":       "MSOC",
+    "womens-soccer":     "WSOC",
+    "womens-volleyball": "WVB",
+    "mens-lacrosse":     "MLAX",
+    "field-hockey":      "FH",
 }
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".m4v", ".mxf", ".mpg", ".mpeg", ".mkv"}
@@ -287,8 +292,94 @@ SPORTS = {
     "WLAX":  {"label": "🥍  Women's Lacrosse",    "code": "WLAX",  "emoji": "🥍"},
     "BASE":  {"label": "⚾  Baseball",             "code": "BASE",  "emoji": "⚾"},
     "SB":    {"label": "🥎  Softball",             "code": "SB",    "emoji": "🥎"},
+    "MSOC":  {"label": "⚽  Men's Soccer",         "code": "MSOC",  "emoji": "⚽"},
+    "WSOC":  {"label": "⚽  Women's Soccer",       "code": "WSOC",  "emoji": "⚽"},
+    "WVB":   {"label": "🏐  Women's Volleyball",  "code": "WVB",   "emoji": "🏐"},
+    "MLAX":  {"label": "🥍  Men's Lacrosse",      "code": "MLAX",  "emoji": "🥍"},
+    "FH":    {"label": "🏑  Field Hockey",         "code": "FH",    "emoji": "🏑"},
 }
 SPORT_OPTIONS = list(SPORTS.keys())
+
+# Sports the user added. Loaded from the config at launch (session["custom_sports"])
+# and kept in step by set_custom_sports, so lookups never need the session.
+_custom_sports = []
+DEFAULT_SPORT_EMOJI = "🏅"
+
+
+def set_custom_sports(entries):
+    """Replace the user's own sports: [{"code", "name", "emoji", "slug"}]."""
+    global _custom_sports
+    clean = []
+    for e in entries or []:
+        code = str(e.get("code", "")).strip().upper()
+        if code and code not in SPORTS and all(c["code"] != code for c in clean):
+            clean.append({"code": code,
+                          "name": str(e.get("name", "")).strip() or code,
+                          "emoji": str(e.get("emoji", "")).strip() or DEFAULT_SPORT_EMOJI,
+                          "slug": str(e.get("slug", "")).strip().strip("/")})
+    _custom_sports = clean
+    return clean
+
+
+def all_sports():
+    """Every sport, built-in first then the user's own: {code: info}. Each info has
+    label, code, emoji, name, slug and custom."""
+    out = {}
+    slug_for = {c: sl for sl, c in SLUG_TO_CODE.items()}
+    for code, info in SPORTS.items():
+        out[code] = dict(info, name=info["label"].split("  ", 1)[-1].strip(),
+                         slug=slug_for.get(code, ""), custom=False)
+    for c in _custom_sports:
+        out[c["code"]] = {"label": f"{c['emoji']}  {c['name']}", "code": c["code"],
+                          "emoji": c["emoji"], "name": c["name"], "slug": c["slug"],
+                          "custom": True}
+    return out
+
+
+def sport_info(code):
+    """One sport's info. An unknown code shows as itself, never as another sport."""
+    info = all_sports().get(code)
+    if info:
+        return info
+    code = code or "?"
+    return {"label": f"{DEFAULT_SPORT_EMOJI}  {code}", "code": code,
+            "emoji": DEFAULT_SPORT_EMOJI, "name": code, "slug": "", "custom": False}
+
+
+def sport_slug(code):
+    """The sport's name in school-site URLs (/sports/<slug>/roster), or ''."""
+    return sport_info(code)["slug"]
+
+
+def suggest_sport_code(name, taken):
+    """A code for a new sport from its name: letters and digits, up to 6, unique."""
+    words = re.findall(r"[A-Za-z0-9]+", name.replace("'", ""))
+    if not words:
+        base = "SPORT"
+    elif len(words) == 1:
+        base = words[0][:4]
+    else:
+        lead = words[0][0] if words[0].lower() in ("mens", "men", "womens", "women") else ""
+        rest = words[1:] if lead else words
+        base = lead + "".join(w[:3] for w in rest)
+    base = base.upper()[:6]
+    code, n = base, 2
+    while code in taken:
+        suffix = str(n)
+        code = base[:6 - len(suffix)] + suffix
+        n += 1
+    return code
+
+
+def validate_sport_code(code, taken):
+    """Return '' if code can be a new sport's code, else the reason it can't."""
+    if not code:
+        return "Enter a code."
+    if not re.fullmatch(r"[A-Z0-9]{1,6}", code):
+        return "Use 1 to 6 capital letters or digits, with no spaces."
+    if code in taken:
+        return f"{code} is already used by another sport."
+    return ""
 
 DEFAULT_SESSION = {
     "sport": "MBB", "opponent": "OPP",
@@ -305,6 +396,8 @@ DEFAULT_SESSION = {
 # Starter Play and Rating labels, assigned hotkeys in order from TEMPLATE_KEYS.
 _BASKETBALL_PLAYS = ["LAYUP", "THREE", "DUNK", "JUMPER", "FLOATER", "POST UP",
                      "DRIVE", "FREE THROW", "ASSIST", "REBOUND", "STEAL", "BLOCK"]
+_SOCCER_PLAYS = ["GOAL", "ASSIST", "SHOT", "SAVE", "CROSS", "CORNER",
+                 "FREE KICK", "PK", "TACKLE", "HEADER", "THROUGH BALL", "CLEARANCE"]
 _HOCKEY_PLAYS = ["GOAL", "ASSIST", "SHOT", "SAVE", "HIT", "FACEOFF",
                  "BREAKAWAY", "ONE TIMER", "POWER PLAY", "PENALTY", "BLOCK", "TAKEAWAY"]
 SPORT_PLAY_TEMPLATES = {
@@ -320,6 +413,14 @@ SPORT_PLAY_TEMPLATES = {
              "WALK", "BUNT", "STOLEN BASE", "DOUBLE PLAY", "CATCH", "THROW OUT"],
     "SB":   ["PITCH", "STRIKEOUT", "SINGLE", "DOUBLE", "TRIPLE", "HOME RUN",
              "BUNT", "SLAP", "STOLEN BASE", "DOUBLE PLAY", "CATCH", "THROW OUT"],
+    "MSOC": _SOCCER_PLAYS,
+    "WSOC": _SOCCER_PLAYS,
+    "WVB":  ["KILL", "ATTACK", "SERVE", "ACE", "DIG", "BLOCK",
+             "SET", "PASS", "RECEPTION", "TIP", "FREE BALL", "TRANSITION"],
+    "MLAX": ["GOAL", "ASSIST", "SHOT", "SAVE", "DODGE", "FACEOFF",
+             "GROUND BALL", "CLEAR", "RIDE", "CHECK", "EMO", "CAUSED TO"],
+    "FH":   ["GOAL", "ASSIST", "SHOT", "SAVE", "PENALTY CORNER", "STROKE",
+             "TACKLE", "INTERCEPT", "DRIBBLE", "AERIAL", "FREE HIT", "CIRCLE ENTRY"],
 }
 _BASKETBALL_RATINGS = ["GOOD", "MISS", "FOUL", "TO"]
 _HOCKEY_RATINGS     = ["GOOD", "MISS", "SAVED", "BLOCKED", "TO"]
@@ -333,6 +434,11 @@ SPORT_RATING_TEMPLATES = {
     "WLAX": ["GOOD", "MISS", "SAVED", "FOUL", "TO"],
     "BASE": _DIAMOND_RATINGS,
     "SB":   _DIAMOND_RATINGS,
+    "MSOC": ["GOOD", "MISS", "SAVED", "BLOCKED", "FOUL", "TO"],
+    "WSOC": ["GOOD", "MISS", "SAVED", "BLOCKED", "FOUL", "TO"],
+    "WVB":  ["GOOD", "ERROR", "BLOCKED", "DUG", "OUT"],
+    "MLAX": ["GOOD", "MISS", "SAVED", "FOUL", "TO"],
+    "FH":   ["GOOD", "MISS", "SAVED", "FOUL", "TO"],
 }
 # No "0": the shortcut editors sort digit keys numerically, which would move it to the front.
 TEMPLATE_KEYS = "123456789qwe"
@@ -347,6 +453,136 @@ def default_shortcuts(sport_key: str) -> dict:
         "plays":   bank(SPORT_PLAY_TEMPLATES.get(sport_key, [])),
         "ratings": bank(SPORT_RATING_TEMPLATES.get(sport_key, ["GOOD", "MISS"])),
     }
+
+PLAYER_STEP = {"id": "players", "label": "Player"}
+
+
+def sport_steps(session, sport):
+    """The logging steps for one sport, in order, as [{"id", "label"}]. Player is
+    included wherever it sits, or missing when the sport has it turned off.
+    A sport with no steps of its own yet uses the older shared list, which is
+    no longer changed, so it looks exactly as it did before steps were per sport."""
+    per = (session or {}).get("sport_steps") or {}
+    steps = per.get(sport)
+    if isinstance(steps, list) and steps:
+        return steps
+    legacy = (session or {}).get("custom_steps") or DEFAULT_SESSION["custom_steps"]
+    return [dict(PLAYER_STEP)] + [dict(s) for s in legacy]
+
+
+def own_sport_steps(session, sport):
+    """The sport's step list, stored on the session so changes apply to that sport only.
+    Call this before adding, removing, renaming or reordering steps."""
+    per = session.setdefault("sport_steps", {})
+    if not (isinstance(per.get(sport), list) and per[sport]):
+        per[sport] = [dict(s) for s in sport_steps(session, sport)]
+    return per[sport]
+
+
+BLANK_SPORT_STEPS = [{"id": "players", "label": "Player"},
+                     {"id": "plays",   "label": "Play"},
+                     {"id": "ratings", "label": "Rating"}]
+
+
+def create_custom_sport(session, shortcuts_data, entry, copy_from=None):
+    """Add a user sport to the session: its registry entry, its own steps and empty
+    or copied label banks. copy_from is another sport's code, or None for blank
+    Player, Play and Rating steps. The roster is never copied. Returns the code."""
+    import copy
+    code = entry["code"]
+    session.setdefault("custom_sports", []).append(
+        {"code": code, "name": entry["name"],
+         "emoji": entry.get("emoji") or DEFAULT_SPORT_EMOJI,
+         "slug": entry.get("slug", "")})
+    set_custom_sports(session["custom_sports"])
+    if copy_from:
+        steps = copy.deepcopy(sport_steps(session, copy_from))
+        src = shortcuts_data.get(copy_from) or default_shortcuts(copy_from)
+    else:
+        steps = copy.deepcopy(BLANK_SPORT_STEPS)
+        src = {}
+    session.setdefault("sport_steps", {})[code] = steps
+    banks = {"players": []}
+    for st in steps:
+        if st["id"] != "players":
+            banks[st["id"]] = copy.deepcopy(src.get(st["id"], []))
+    shortcuts_data[code] = banks
+    return code
+
+
+def remove_custom_sport(session, shortcuts_data, rosters, rosters_meta, key_presets, code):
+    """Forget a user sport: its registry entry, steps, labels, naming presets, roster
+    cache and hotkey layouts. Stats and video files are not touched. Built-in sports
+    are refused. Returns True when the sport was removed."""
+    if code in SPORTS:
+        return False
+    before = session.get("custom_sports", [])
+    session["custom_sports"] = [c for c in before if c.get("code") != code]
+    set_custom_sports(session["custom_sports"])
+    for store in (session.get("sport_steps"), session.get("sport_presets"),
+                  shortcuts_data, rosters, rosters_meta, key_presets):
+        if isinstance(store, dict):
+            store.pop(code, None)
+    return len(session["custom_sports"]) != len(before)
+
+
+def update_custom_sport(session, code, name=None, emoji=None, slug=None):
+    """Change a user sport's name, emoji or school-site slug. The code never changes."""
+    for c in session.get("custom_sports", []):
+        if c.get("code") == code:
+            if name is not None and name.strip():
+                c["name"] = name.strip()
+            if emoji is not None:
+                c["emoji"] = emoji.strip() or DEFAULT_SPORT_EMOJI
+            if slug is not None:
+                c["slug"] = slug.strip().strip("/")
+            set_custom_sports(session["custom_sports"])
+            return True
+    return False
+
+
+def stat_segments(parts, part_steps, custom_indices, boundaries, step_order):
+    """Split one logged clip into per-player segments for stats: [(parts, part_steps)].
+    Typed custom text is left out. When Player isn't the first step, the labels picked
+    before it describe the whole clip, so every chained player shares them unless
+    that player's segment has its own label on the step."""
+    part_steps = list(part_steps) + [None] * (len(parts) - len(part_steps))
+    starts = [0] + sorted(boundaries)
+    ends = sorted(boundaries) + [len(parts)]
+    segs = []
+    for a, b in zip(starts, ends):
+        keep = [i for i in range(a, b) if i not in custom_indices]
+        segs.append(([parts[i] for i in keep], [part_steps[i] for i in keep]))
+    if len(segs) > 1 and "players" in step_order:
+        before = set(step_order[:step_order.index("players")])
+        shared = [(p, st) for p, st in zip(*segs[0]) if st in before]
+        for k in range(1, len(segs)):
+            sp, ss = segs[k]
+            add = [(p, st) for p, st in shared if st not in ss]
+            segs[k] = ([p for p, _ in add] + sp, [st for _, st in add] + ss)
+    return segs
+
+
+def stat_rows_for_segment(parts, part_steps, step_order, step_labels=None):
+    """Turn one logged player-sequence into stats rows, using the step each label
+    was picked on rather than its position. parts and part_steps are parallel lists
+    with typed custom text already removed. Each player gets a row; the sport's
+    last non-player step is the rating; the other steps together are the play.
+    Returns [(player, play, rating, {step label: value})]."""
+    if not parts:
+        return []
+    others = [s for s in step_order if s != "players"]
+    rating_step = others[-1] if others else None
+    by_step = {}
+    for p, s in zip(parts, part_steps):
+        by_step.setdefault(s, []).append(p)
+    players = by_step.get("players") or [""]
+    rating  = "_".join(by_step.get(rating_step, []))
+    play    = "_".join(p for s in others if s != rating_step for p in by_step.get(s, []))
+    labels  = step_labels or {}
+    detail  = {labels.get(s, s): "_".join(v) for s, v in by_step.items() if s != "players"}
+    return [(player, play, rating, detail) for player in players]
+
 
 # ── Brand colors  (#8c2232 crimson, #dbcca6 tan) ─────────────────────────────
 def _parse_hex(hex_str: str):
@@ -804,7 +1040,7 @@ def abbrev_for_opponent(name):
 def scrape_schedule(sport_key, base_url):
     """Return deduplicated opponent names from the Sidearm schedule page."""
     import html as _html_mod
-    slug = next((s for s, c in SLUG_TO_CODE.items() if c == sport_key), None)
+    slug = sport_slug(sport_key)
     if not slug:
         return []
     now         = datetime.now()
@@ -855,15 +1091,17 @@ def discover_roster_links(base_url):
         with urllib.request.urlopen(req, timeout=15) as r:
             html = r.read().decode("utf-8", errors="ignore")
         slugs = re.findall(r'href="(?:[^"]*)/sports/([^/"]+)/roster"', html)
+        code_for = {i["slug"]: c for c, i in all_sports().items() if i["slug"]}
         for slug in dict.fromkeys(slugs):  # dedupe, preserve order
-            code = SLUG_TO_CODE.get(slug)
+            code = code_for.get(slug)
             if code and code not in found:
                 found[code] = f"{base}/sports/{slug}/roster"
     except Exception:
         pass
     # Fill in known sports not surfaced by discovery
-    for slug, code in SLUG_TO_CODE.items():
-        if code not in found:
+    for code, info in all_sports().items():
+        slug = info["slug"]
+        if slug and code not in found:
             found[code] = f"{base}/sports/{slug}/roster"
     return found
 
@@ -916,7 +1154,7 @@ def fetch_roster(sport_key, cache_days: int = 7):
             return [sc["label"] for sc in cache[sport_key]]
     # Cache miss — scrape the user's school website; nothing to fetch until one is set
     base_url = load_json(SETTINGS_FILE, DEFAULT_SETTINGS).get("roster_base_url", "").strip()
-    slug = next((s for s, c in SLUG_TO_CODE.items() if c == sport_key), None)
+    slug = sport_slug(sport_key)
     if not base_url or not slug:
         return []
     return fetch_roster_from_url(f"{base_url.rstrip('/')}/sports/{slug}/roster")
@@ -1254,8 +1492,8 @@ def _style_reject_cell(owner, cell, row):
         NSAttributedString.alloc().initWithString_attributes_(name, attrs))
 
 
-def log_stat(session, player, play, rating):
-    """Append one tagged-clip event to STATS_FILE."""
+def log_stat(session, player, play, rating, steps=None):
+    """Append one tagged-clip event to STATS_FILE. steps is {step label: value}."""
     _now = datetime.now()
     entry = {
         "ts":       _now.isoformat(),
@@ -1267,6 +1505,8 @@ def log_stat(session, player, play, rating):
         "opponent": session.get("opponent",    "") if session else "",
         "phase":    session.get("phase",       "") if session else "",
     }
+    if steps:
+        entry["steps"] = dict(steps)
     data = load_json(STATS_FILE, [])
     if not isinstance(data, list):
         data = []
@@ -2279,6 +2519,8 @@ class TagWindowV2:
         self._branch_items           = None  # overrides bank items when inside a branch
         # Multi-action chaining state
         self._chain_boundary_indices = set() # _tag_parts indices where new chains start
+        self._tag_part_steps         = []    # step id each _tag_parts entry was picked on
+        self._sport_setup            = None  # {"code", "prev"} while Add Sport is on step 2
         self._chain_btns             = {}    # {bank: PillButton} for "+ Player (+)" buttons
         # Search-mode state
         self._search_enabled     = False   # toggled by top-bar switch
@@ -2290,13 +2532,30 @@ class TagWindowV2:
         self._rebuild_steps()
         self._build_window()
 
+    def _current_sport(self):
+        return self.app.session.get("sport", "MBB") if self.app else "MBB"
+
+    def _sport_step_list(self):
+        """This sport's steps as [{"id", "label"}], Player included where it sits."""
+        config = self.app.session if self.app else DEFAULT_SESSION
+        return sport_steps(config, self._current_sport())
+
+    def _own_step_list(self):
+        """This sport's steps, stored so edits apply to this sport only."""
+        if not self.app:
+            return self._sport_step_list()
+        return own_sport_steps(self.app.session, self._current_sport())
+
+    def _non_player_steps(self):
+        return [s for s in self._sport_step_list() if s["id"] != "players"]
+
     def _rebuild_steps(self):
-        config  = self.app.session if self.app else DEFAULT_SESSION
-        custom  = config.get("custom_steps", DEFAULT_SESSION["custom_steps"])
-        self._steps = ["players"] + [s["id"] for s in custom]
+        steps = self._sport_step_list()
+        self._steps = [s["id"] for s in steps]
         self._step_labels_map = {"players": "Player"}
-        for s in custom:
-            self._step_labels_map[s["id"]] = s["label"]
+        for st in steps:
+            if st["id"] != "players":
+                self._step_labels_map[st["id"]] = st["label"]
 
     def _step_label(self, step_key):
         label    = self._step_labels_map.get(step_key, step_key.title())
@@ -3188,7 +3447,7 @@ class TagWindowV2:
         cx       = cards_x + ((W - cards_x) - TOTAL_W) / 2
 
         self._sc_total_w      = TOTAL_W
-        self._sc_current_bank = "players"
+        self._sc_current_bank = self._steps[0]
 
         # Position below Now Tagging card
         now_card_h = self._now_card_h
@@ -3215,8 +3474,8 @@ class TagWindowV2:
                 _hex_color_alpha("#ffffff", 0.08).CGColor())
             card.setAutoresizingMask_(8)  # minY only — x-position managed by _reposition_layout
             # Stack all cards at the same position; only current bank is opaque
-            card.setAlphaValue_(1.0 if bank == "players" else 0.0)
-            card.setHidden_(bank != "players")  # transparent views still take clicks
+            card.setAlphaValue_(1.0 if bank == self._steps[0] else 0.0)
+            card.setHidden_(bank != self._steps[0])  # transparent views still take clicks
             cv.addSubview_(card)
             self._sc_cards[bank] = card
 
@@ -3246,7 +3505,7 @@ class TagWindowV2:
             self._populate_shortcut_pills(bank)
 
         # Initial active card styling
-        self._set_active_shortcut_card("players")
+        self._set_active_shortcut_card(self._steps[0])
 
         # ── Resize handle below shortcut card ───────────────────────────────
         handle_h = 12
@@ -3296,8 +3555,8 @@ class TagWindowV2:
             card.layer().setBorderColor_(
                 _hex_color_alpha("#ffffff", 0.08).CGColor())
             card.setAutoresizingMask_(8)
-            card.setAlphaValue_(1.0 if bank == "players" else 0.0)
-            card.setHidden_(bank != "players")  # transparent views still take clicks
+            card.setAlphaValue_(1.0 if bank == self._steps[0] else 0.0)
+            card.setHidden_(bank != self._steps[0])  # transparent views still take clicks
             cv.addSubview_(card)
             self._sc_cards[bank] = card
 
@@ -3324,8 +3583,8 @@ class TagWindowV2:
 
             self._populate_shortcut_pills(bank)
 
-        self._sc_current_bank = "players"
-        self._set_active_shortcut_card("players")
+        self._sc_current_bank = self._steps[0]
+        self._set_active_shortcut_card(self._steps[0])
 
     # ── Tagging key handling ──────────────────────────────────────────────────
 
@@ -3413,6 +3672,7 @@ class TagWindowV2:
             self._reset_branch_state()   # restore card title if mid-branch
             self.step                    = None
             self._tag_parts              = []
+            self._tag_part_steps         = []
             self._custom_indices         = set()
             self._custom_mode            = False
             self._custom_input           = ""
@@ -3439,6 +3699,8 @@ class TagWindowV2:
                 elif self._tag_parts:
                     popped_idx = len(self._tag_parts) - 1
                     self._tag_parts.pop()
+                    if len(self._tag_part_steps) > len(self._tag_parts):
+                        self._tag_part_steps.pop()
                     self._custom_indices         = {i for i in self._custom_indices
                                                     if i < popped_idx}
                     self._chain_boundary_indices = {i for i in self._chain_boundary_indices
@@ -3486,6 +3748,7 @@ class TagWindowV2:
             return
         label = sc["label"]
         self._tag_parts.append(label.replace(" ", "_"))
+        self._tag_part_steps.append(bank)
         self._now_tag_preview.setStringValue_("_".join(self._tag_parts) or "—")
         step_lbl = self._step_labels_map.get(bank, bank.title())
         self._set_v2_hint(
@@ -3497,7 +3760,7 @@ class TagWindowV2:
         if self._custom_mode:
             return
         if self.step is None:
-            if bank != "players" or self._selected_file_idx < 0 or not self._files:
+            if bank != self._steps[0] or self._selected_file_idx < 0 or not self._files:
                 return
             self._reset_tag_state()
             self._start_player_step()
@@ -3577,6 +3840,7 @@ class TagWindowV2:
     def _reset_tag_state(self):
         """Full reset of all tagging session state. Call after finalize, skip, or cancel."""
         self._tag_parts              = []
+        self._tag_part_steps         = []
         self._custom_indices         = set()
         self._custom_input           = ""
         self._chain_boundary_indices = set()
@@ -3647,11 +3911,15 @@ class TagWindowV2:
                 step_lbl = self._step_labels_map.get(current_bank, current_bank.title())
                 self._sc_titles[current_bank].setStringValue_(step_lbl.upper())
                 self._populate_shortcut_pills(current_bank)
+        if "players" not in self._steps:
+            self._set_v2_hint("This sport has no Player step, so + has nothing to add")
+            return
         # Mark chain boundary at the current end of tag parts
         self._chain_boundary_indices.add(len(self._tag_parts))
-        # Transition to player step without clearing the accumulated preview
+        # Jump to the Player step, wherever it sits, keeping the accumulated preview
+        p_idx = self._steps.index("players")
         self.step = "players"
-        self._set_step_state(active=0)   # triggers card cross-fade via _set_cards_for_step
+        self._set_step_state(active=p_idx, completed=tuple(range(p_idx)))
         if self._players_bypass_hotkeys and not self._search_enabled:
             self._toggle_search_mode()
         title, hint = self._step_label("players")
@@ -3662,6 +3930,15 @@ class TagWindowV2:
         self._now_tag_preview.setStringValue_(f"{acc}_…" if acc else "…")
 
     def _start_player_step(self):
+        """Begin a log at the sport's first step (Player unless the sport moved it)."""
+        first = self._steps[0]
+        if first != "players":
+            self.step = first
+            self._set_step_state(active=0)
+            title, hint = self._step_label(first)
+            self._set_v2_hint(f"⚡ {title}  —  {hint}")
+            self._now_tag_preview.setStringValue_("…")
+            return
         self.step = "players"
         self._set_step_state(active=0)
         if self._players_bypass_hotkeys:
@@ -3710,6 +3987,7 @@ class TagWindowV2:
     def _confirm_custom_label_v2(self, label: str):
         self._custom_indices.add(len(self._tag_parts))
         self._tag_parts.append(label)
+        self._tag_part_steps.append(self._step_before_custom)
         self._custom_input       = ""
         self._custom_mode        = False
         self.step                = self._step_before_custom
@@ -3766,6 +4044,7 @@ class TagWindowV2:
         label = sc["label"]
         self._exit_search_mode()
         self._tag_parts.append(label.replace(" ", "_"))
+        self._tag_part_steps.append(bank)
         self._now_tag_preview.setStringValue_("_".join(self._tag_parts) or "—")
         step_lbl = self._step_labels_map.get(bank, bank.title())
         self._set_v2_hint(
@@ -3968,21 +4247,15 @@ class TagWindowV2:
                 "renames": [undo_entry],
             }, max_stack=self._settings.get("undo_stack_size", 50))
             # Log stat — split at chain boundaries, hotkey parts only per segment
-            boundaries = sorted(self._chain_boundary_indices)
-            seg_starts = [0] + boundaries
-            seg_ends   = boundaries + [len(self._tag_parts)]
-            for start, end in zip(seg_starts, seg_ends):
-                seg = [self._tag_parts[i] for i in range(start, end)
-                       if i not in self._custom_indices]
-                if not seg:
+            for seg_parts, seg_steps in stat_segments(
+                    self._tag_parts, self._tag_part_steps, self._custom_indices,
+                    self._chain_boundary_indices, self._steps):
+                rows = stat_rows_for_segment(
+                    seg_parts, seg_steps, self._steps, self._step_labels_map)
+                if not self._settings.get("record_stats", True):
                     continue
-                if self._settings.get("record_stats", True):
-                    log_stat(
-                        self.app.session,
-                        seg[0]              if len(seg) >= 1 else "",
-                        "_".join(seg[1:-1]) if len(seg) >= 3 else "",
-                        seg[-1]             if len(seg) >= 2 else "",
-                    )
+                for player, play, rating, detail in rows:
+                    log_stat(self.app.session, player, play, rating, detail)
 
         color_note = "  (Finder color could not be set)" if color_failed else ""
         self._now_tag_preview.setStringValue_(f"✓  {new_name}{color_note}")
@@ -4695,8 +4968,8 @@ class TagWindowV2:
         sport_pill.layer().setBorderColor_(_hex_color_alpha("#ffffff", 0.18).CGColor())
         sport_pill.setAutoresizingMask_(8)
         active_sport = self.app.session.get("sport", "MBB") if self.app else "MBB"
-        sport_info   = SPORTS.get(active_sport, SPORTS["MBB"])
-        sport_label  = f"▸  {sport_info['emoji']}  {sport_info['label'].split('  ',1)[-1]}  ▾"
+        sp_info      = sport_info(active_sport)
+        sport_label  = f"▸  {sp_info['emoji']}  {sp_info['name']}  ▾"
         sport_pill_lbl = NSTextField.labelWithString_(sport_label)
         sport_pill_lbl.setFont_(NSFont.systemFontOfSize_(12))
         sport_pill_lbl.setTextColor_(NSColor.labelColor())
@@ -4817,6 +5090,14 @@ class TagWindowV2:
             self._sport_picker_mt = MenuTarget.alloc().init()
 
         def on_pick(sport_key):
+            if sport_key == "__add__":
+                self._start_add_sport()
+                return
+            if sport_key == "__edit__":
+                self._edit_sports()
+                return
+            if self._sport_setup and sport_key != self._sport_setup["code"]:
+                self._end_sport_setup()   # picking another sport leaves the setup; the new sport is kept
             if self.app:
                 self.app.switch_sport(sport_key)
             self._update_sport_pill(sport_key)
@@ -4825,7 +5106,8 @@ class TagWindowV2:
         active = self.app.session.get("sport", "MBB") if self.app else "MBB"
         menu = NSMenu.alloc().init()
         menu.setAutoenablesItems_(False)
-        for key, info in SPORTS.items():
+        sports = all_sports()
+        for key, info in sports.items():
             mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                 info["label"], "menuPicked:", "")
             mi.setTarget_(self._sport_picker_mt)
@@ -4833,15 +5115,369 @@ class TagWindowV2:
             if key == active:
                 mi.setState_(1)
             menu.addItem_(mi)
+        menu.addItem_(NSMenuItem.separatorItem())
+        extra = [("Add Sport…", "__add__")]
+        if any(i["custom"] for i in sports.values()):
+            extra.append(("Edit Sports…", "__edit__"))
+        for title, rep_obj in extra:
+            mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, "menuPicked:", "")
+            mi.setTarget_(self._sport_picker_mt)
+            mi.setRepresentedObject_(rep_obj)
+            menu.addItem_(mi)
         menu.popUpMenuPositioningItem_atLocation_inView_(None, NSPoint(0, 0), pill)
+
+    # ── Add Sport: 1 basics, 2 steps & labels (Labels tab), 3 done ────────────
+
+    def _sport_basics_form(self, title, info, err="", code_locked=False, copy_choice=True,
+                           delete_btn=False):
+        """Ask for a sport's name, code, emoji, site slug and starting steps.
+        info holds current values. Returns a dict, {"delete": True} for the
+        Delete button, or None on Cancel."""
+        from AppKit import (NSAlert, NSTextField, NSView, NSMakeRect, NSFont,
+                            NSPopUpButton, NSNotificationCenter)
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(title)
+        alert.setInformativeText_(err or
+            "The code goes in file names and can't be changed later. "
+            "The school site name is the part of the URL after /sports/, "
+            "used to fetch the roster.")
+        alert.addButtonWithTitle_("Next" if not code_locked else "Save")
+        alert.addButtonWithTitle_("Cancel")
+        if delete_btn:
+            alert.addButtonWithTitle_("Delete Sport…")
+
+        W, ROW, LBL_W = 360.0, 32.0, 96.0
+        rows = ["Name", "Code", "Emoji", "School site"] + (["Start from"] if copy_choice else [])
+        panel = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, ROW * len(rows)))
+        fields = {}
+        for i, cap in enumerate(rows):
+            y = ROW * (len(rows) - 1 - i)
+            lbl = NSTextField.labelWithString_(cap)
+            lbl.setFont_(NSFont.systemFontOfSize_(12))
+            lbl.setFrame_(NSMakeRect(0, y + 6, LBL_W - 8, 18))
+            panel.addSubview_(lbl)
+            if cap == "Start from":
+                pop = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                    NSMakeRect(LBL_W - 3, y + 1, W - LBL_W + 3, 26), False)
+                fields[cap] = pop
+            else:
+                tf = NSTextField.alloc().initWithFrame_(NSMakeRect(LBL_W, y + 3, W - LBL_W, 24))
+                tf.setFont_(NSFont.systemFontOfSize_(13))
+                fields[cap] = tf
+            panel.addSubview_(fields[cap])
+
+        sports = all_sports()
+        taken = set(sports)
+        name_f, code_f = fields["Name"], fields["Code"]
+        emoji_f, slug_f = fields["Emoji"], fields["School site"]
+        name_f.setPlaceholderString_("e.g. Men's Rugby")
+        name_f.setStringValue_(info.get("name", ""))
+        code_f.setPlaceholderString_("e.g. MRUG")
+        code_f.setStringValue_(info.get("code", ""))
+        emoji_f.setStringValue_(info.get("emoji", DEFAULT_SPORT_EMOJI))
+        slug_f.setPlaceholderString_("optional, e.g. mens-rugby")
+        slug_f.setStringValue_(info.get("slug", ""))
+        if code_locked:
+            code_f.setEditable_(False)
+            code_f.setSelectable_(True)
+            code_f.setTextColor_(_hex_color("#8e8e93"))
+
+        sources = []
+        if copy_choice:
+            pop = fields["Start from"]
+            titles = ["Blank: Player, Play, Rating"]
+            sources = [None]
+            if code_locked:
+                titles.insert(0, "Keep current steps")
+                sources.insert(0, "__keep__")
+            for k, inf in sports.items():
+                if k != info.get("code"):
+                    titles.append(f"Copy of {inf['emoji']}  {inf['name']}")
+                    sources.append(k)
+            pop.addItemsWithTitles_(titles)
+            if info.get("copy_from") in sources:
+                pop.selectItemAtIndex_(sources.index(info["copy_from"]))
+
+        # Suggest a code as the name is typed, until the code is typed in by hand
+        state = {"code_edited": bool(info.get("code"))}
+        observers = []
+        if not code_locked:
+            def name_changed():
+                if not state["code_edited"]:
+                    nm = name_f.stringValue().strip()
+                    code_f.setStringValue_(suggest_sport_code(nm, taken) if nm else "")
+            def code_changed():
+                state["code_edited"] = bool(code_f.stringValue().strip())
+            for tf, cb in ((name_f, name_changed), (code_f, code_changed)):
+                obs = MainCaller.alloc().init()
+                obs._cb = cb
+                NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+                    obs, "fire:", "NSControlTextDidChangeNotification", tf)
+                observers.append(obs)
+        alert.setAccessoryView_(panel)
+        alert.window().setInitialFirstResponder_(name_f)
+        resp = alert.runModal()
+        for obs in observers:
+            NSNotificationCenter.defaultCenter().removeObserver_(obs)
+        if delete_btn and resp == 1002:
+            return {"delete": True}
+        if resp != 1000:
+            return None
+
+        out = {
+            "name":  name_f.stringValue().strip(),
+            "code":  code_f.stringValue().strip().upper(),
+            "emoji": emoji_f.stringValue().strip() or DEFAULT_SPORT_EMOJI,
+            "slug":  slug_f.stringValue().strip().strip("/").lower(),
+            "copy_from": (sources[fields["Start from"].indexOfSelectedItem()]
+                          if copy_choice else None),
+        }
+        problem = ""
+        if not out["name"]:
+            problem = "Enter a name for the sport."
+        elif not code_locked:
+            problem = validate_sport_code(out["code"], taken)
+        if not problem and out["slug"] and not re.fullmatch(r"[a-z0-9-]+", out["slug"]):
+            problem = "The school site name uses only letters, digits and dashes."
+        if problem:
+            return self._sport_basics_form(title, out, err="⚠️  " + problem,
+                                           code_locked=code_locked, copy_choice=copy_choice,
+                                           delete_btn=delete_btn)
+        return out
+
+    def _start_add_sport(self):
+        """Step 1: basics. Creates the sport, switches to it and opens step 2."""
+        if not self.app:
+            return
+        basics = self._sport_basics_form("Add Sport — step 1 of 3", {})
+        if basics is None:
+            return
+        prev = self._current_sport()
+        session = self.app.session
+        code = create_custom_sport(session, self.app._shortcuts_data, basics,
+                                   copy_from=basics["copy_from"])
+        self._save_session()
+        save_json(SHORTCUTS_FILE, self.app._shortcuts_data)
+        self._sport_setup = {"code": code, "prev": prev}
+        self.app.switch_sport(code)
+        self._update_sport_pill(code)
+        self._on_nav_select("labels")
+        self._show_sport_setup_bar()
+
+    def _show_sport_setup_bar(self):
+        bar = getattr(self, "_labels_setup_bar", None)
+        if bar is None or not self._sport_setup:
+            return
+        info = sport_info(self._sport_setup["code"])
+        self._labels_setup_lbl.setStringValue_(
+            f"Setting up {info['emoji']}  {info['name']}  —  step 2 of 3: "
+            "add steps and their labels")
+        if bar.isHidden():
+            bar.setHidden_(False)
+            sv = self._labels_scrollview
+            f = sv.frame()
+            sv.setFrame_(((f.origin.x, f.origin.y + self._labels_setup_bar_h),
+                          (f.size.width, f.size.height - self._labels_setup_bar_h)))
+
+    def _end_sport_setup(self):
+        self._sport_setup = None
+        bar = getattr(self, "_labels_setup_bar", None)
+        if bar is not None and not bar.isHidden():
+            bar.setHidden_(True)
+            sv = self._labels_scrollview
+            f = sv.frame()
+            sv.setFrame_(((f.origin.x, f.origin.y - self._labels_setup_bar_h),
+                          (f.size.width, f.size.height + self._labels_setup_bar_h)))
+
+    def _setup_back(self):
+        """Back to step 1. The code is fixed by now; name, emoji, site and steps can change."""
+        st = self._sport_setup
+        if not st:
+            return
+        info = sport_info(st["code"])
+        out = self._sport_basics_form(
+            "Add Sport — step 1 of 3",
+            {"name": info["name"], "code": st["code"], "emoji": info["emoji"],
+             "slug": info["slug"], "copy_from": "__keep__"},
+            code_locked=True)
+        if out is None:
+            return
+        update_custom_sport(self.app.session, st["code"], out["name"], out["emoji"], out["slug"])
+        self._save_session()
+        if out["copy_from"] != "__keep__":
+            if out["copy_from"] is None:
+                import copy
+                own = self._own_step_list()
+                for s_ in own:
+                    if s_["id"] != "players":
+                        self.shortcuts.pop(s_["id"], None)
+                own[:] = copy.deepcopy(BLANK_SPORT_STEPS)
+                for s_ in own:
+                    if s_["id"] != "players":
+                        self.shortcuts[s_["id"]] = []
+                self._save_session()
+                self.app._save_shortcuts()
+            else:
+                self._copy_steps_from_sport(out["copy_from"], ask=True)
+            self._apply_steps_change()
+        self.app._build_menu()
+        self._update_sport_pill()
+        self._show_sport_setup_bar()
+
+    def _setup_cancel(self):
+        from AppKit import NSAlert
+        st = self._sport_setup
+        if not st:
+            return
+        info = sport_info(st["code"])
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(f"Discard {info['name']}?")
+        alert.setInformativeText_("The new sport, its steps and its labels are removed. "
+                                  "No video files are touched.")
+        alert.addButtonWithTitle_("Discard")
+        alert.addButtonWithTitle_("Keep Setting Up")
+        if alert.runModal() != 1000:
+            return
+        prev = st["prev"] if st["prev"] in all_sports() and st["prev"] != st["code"] else "MBB"
+        self._end_sport_setup()
+        self._delete_sport_data(st["code"], switch_to=prev)
+
+    def _setup_next(self):
+        """Step 3: summary, then Finish (and an offer to fetch the roster)."""
+        from AppKit import NSAlert
+        st = self._sport_setup
+        if not st:
+            return
+        code = st["code"]
+        info = sport_info(code)
+        steps = self._sport_step_list()
+        empty = [s_["label"] for s_ in steps
+                 if s_["id"] != "players" and not self.shortcuts.get(s_["id"])]
+        if empty:
+            a = NSAlert.alloc().init()
+            a.setMessageText_("Some steps have no labels")
+            a.setInformativeText_(
+                f"{', '.join(empty)} {'has' if len(empty) == 1 else 'have'} no labels yet. "
+                "You can still type text on those steps with ⌥ Option while logging.")
+            a.addButtonWithTitle_("Keep Editing")
+            a.addButtonWithTitle_("Continue Anyway")
+            if a.runModal() == 1000:
+                return
+
+        lines = [f"Code: {code}",
+                 "Steps: " + "  →  ".join(s_["label"] for s_ in steps)]
+        for s_ in steps:
+            if s_["id"] != "players":
+                n = len(self.shortcuts.get(s_["id"], []))
+                lines.append(f"{s_['label']}: {n} label{'s' if n != 1 else ''}")
+        if not any(s_["id"] == "players" for s_ in steps):
+            lines.append("Player step is off")
+        base_url = (self._settings or {}).get("roster_base_url", "").strip()
+        can_fetch = bool(info["slug"] and base_url
+                         and any(s_["id"] == "players" for s_ in steps))
+        lines.append(f"School site: /sports/{info['slug']}" if info["slug"]
+                     else "School site: none (add players on the Team tab)")
+
+        a = NSAlert.alloc().init()
+        a.setMessageText_(f"{info['emoji']}  {info['name']} is ready — step 3 of 3")
+        a.setInformativeText_("\n".join(lines))
+        if can_fetch:
+            a.addButtonWithTitle_("Finish and Fetch Roster")
+        a.addButtonWithTitle_("Finish")
+        a.addButtonWithTitle_("Back")
+        resp = a.runModal()
+        back = 1002 if can_fetch else 1001
+        if resp == back:
+            return
+        self._end_sport_setup()
+        if can_fetch and resp == 1000:
+            cd = (self._settings or {}).get("roster_cache_days", 7)
+            threading.Thread(target=self.app._load_roster_bg,
+                             args=(code, False, cd), daemon=True).start()
+            self._on_nav_select("players")
+
+    # ── Edit Sports (user sports only) ────────────────────────────────────────
+
+    def _edit_sports(self):
+        from AppKit import NSAlert, NSPopUpButton, NSMakeRect
+        customs = [i for i in all_sports().values() if i["custom"]]
+        if not customs:
+            return
+        target = customs[0]["code"]
+        if len(customs) > 1:
+            a = NSAlert.alloc().init()
+            a.setMessageText_("Edit Sports")
+            a.setInformativeText_("Choose one of your sports. Built-in sports can't be edited.")
+            a.addButtonWithTitle_("Edit")
+            a.addButtonWithTitle_("Cancel")
+            pop = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 260, 26), False)
+            pop.addItemsWithTitles_([i["label"] for i in customs])
+            cur = self._current_sport()
+            for n, i in enumerate(customs):
+                if i["code"] == cur:
+                    pop.selectItemAtIndex_(n)
+            a.setAccessoryView_(pop)
+            if a.runModal() != 1000:
+                return
+            target = customs[pop.indexOfSelectedItem()]["code"]
+        self._edit_one_sport(target)
+
+    def _edit_one_sport(self, code):
+        from AppKit import NSAlert
+        info = sport_info(code)
+        out = self._sport_basics_form(
+            f"Edit {info['name']}",
+            {"name": info["name"], "code": code, "emoji": info["emoji"], "slug": info["slug"]},
+            err="The code can't be changed, because clips already use it. "
+                "Edit steps and labels on the Labels tab.",
+            code_locked=True, copy_choice=False, delete_btn=True)
+        if out is None:
+            return
+        if out.get("delete"):
+            a = NSAlert.alloc().init()
+            a.setMessageText_(f"Delete {info['name']}?")
+            a.setInformativeText_(
+                "Its steps, labels, roster and naming presets are removed. "
+                "Stats and video files are kept. This can't be undone.")
+            a.addButtonWithTitle_("Cancel")
+            a.addButtonWithTitle_("Delete Sport")
+            if a.runModal() == 1001:
+                if self._sport_setup and self._sport_setup["code"] == code:
+                    self._end_sport_setup()
+                self._delete_sport_data(code)
+            return
+        update_custom_sport(self.app.session, code, out["name"], out["emoji"], out["slug"])
+        self._save_session()
+        self.app._build_menu()
+        self._update_sport_pill()
+
+    def _delete_sport_data(self, code, switch_to=None):
+        """Remove a user sport everywhere. Switches away first if it's the active sport."""
+        if not self.app or code in SPORTS:
+            return
+        if self._current_sport() == code:
+            nxt = switch_to if switch_to in all_sports() and switch_to != code else "MBB"
+            self.app.switch_sport(nxt)
+        rosters = load_json(ROSTERS_FILE, {})
+        meta = load_json(ROSTERS_META_FILE, {})
+        keyp = load_json(KEY_PRESETS_FILE, {})
+        remove_custom_sport(self.app.session, self.app._shortcuts_data,
+                            rosters, meta, keyp, code)
+        save_json(ROSTERS_FILE, rosters)
+        save_json(ROSTERS_META_FILE, meta)
+        save_json(KEY_PRESETS_FILE, keyp)
+        self._save_session()
+        self.app._save_shortcuts()
+        self.app._build_menu()
+        self._update_sport_pill()
 
     def _update_sport_pill(self, sport_key=None):
         if sport_key is None and self.app:
             sport_key = self.app.session.get("sport", "MBB")
         if sport_key is None:
             sport_key = "MBB"
-        info = SPORTS.get(sport_key, SPORTS["MBB"])
-        label = f"▸  {info['emoji']}  {info['label'].split('  ',1)[-1]}  ▾"
+        info = sport_info(sport_key)
+        label = f"▸  {info['emoji']}  {info['name']}  ▾"
         if hasattr(self, "_sport_pill_lbl") and self._sport_pill_lbl is not None:
             self._sport_pill_lbl.setStringValue_(label)
         if hasattr(self, "_labels_sport_pill_lbl") and self._labels_sport_pill_lbl is not None:
@@ -5362,7 +5998,7 @@ class TagWindowV2:
                 self._players_fetch_all)
         if hasattr(self, "_roster_status_lbl") and self._roster_status_lbl:
             if success and results:
-                parts = [f"{SPORTS[c]['emoji']} {len(n)}" for c, n in results.items() if c in SPORTS]
+                parts = [f"{sport_info(c)['emoji']} {len(n)}" for c, n in results.items()]
                 summary = "  ·  ".join(parts[:6])
                 if len(parts) > 6:
                     summary += f"  +{len(parts)-6} more"
@@ -5421,8 +6057,8 @@ class TagWindowV2:
             _hex_color_alpha("#ffffff", 0.18).CGColor())
         labels_sport_pill.setAutoresizingMask_(8)
         active_sport = self.app.session.get("sport", "MBB") if self.app else "MBB"
-        sport_info   = SPORTS.get(active_sport, SPORTS["MBB"])
-        sport_lbl_str = f"▸  {sport_info['emoji']}  {sport_info['label'].split('  ',1)[-1]}  ▾"
+        sp_info      = sport_info(active_sport)
+        sport_lbl_str = f"▸  {sp_info['emoji']}  {sp_info['name']}  ▾"
         labels_sport_pill_lbl = NSTextField.labelWithString_(sport_lbl_str)
         labels_sport_pill_lbl.setFont_(NSFont.systemFontOfSize_(12))
         labels_sport_pill_lbl.setTextColor_(NSColor.labelColor())
@@ -5444,6 +6080,16 @@ class TagWindowV2:
             "+ Add Step", "#8c2232", "#6b1a26", self._labels_add_step)
         add_step_btn.setAutoresizingMask_(1 | 8)
         section.addSubview_(add_step_btn)
+
+        COPY_STEPS_W = 150.0
+        copy_steps_btn = ActionButton.alloc().initWithFrame_(
+            NSMakeRect(cw - 32 - ADD_STEP_W - 8 - COPY_STEPS_W,
+                       header_y + (HEADER_H - BTN_H) / 2, COPY_STEPS_W, BTN_H))
+        copy_steps_btn.configureTitle_bg_press_action_(
+            "Copy Steps From…", "#3a3a3c", "#2c2c2e", self._labels_copy_steps_from)
+        copy_steps_btn.setAutoresizingMask_(1 | 8)
+        section.addSubview_(copy_steps_btn)
+        self._labels_copy_steps_btn = copy_steps_btn
 
         def _sep(y):
             s = NSView.alloc().initWithFrame_(NSMakeRect(0, y, cw, 1))
@@ -5523,9 +6169,40 @@ class TagWindowV2:
         sv.setDocumentView_(container)
         self._labels_grid_container = container
 
+        # ── Add Sport setup bar (step 2 of 3), shown only while setting up ────
+        BAR_H = 56.0
+        bar = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, cw, BAR_H))
+        bar.setWantsLayer_(True)
+        bar.layer().setBackgroundColor_(_hex_color_alpha(COLOR_CRIMSON, 0.28).CGColor())
+        bar.setAutoresizingMask_(2 | 32)
+        bar.setHidden_(True)
+        section.addSubview_(bar)
+        self._labels_setup_bar   = bar
+        self._labels_setup_bar_h = BAR_H
+        NEXT_W, CANCEL_W, BACK_W, GAP = 92.0, 92.0, 80.0, 8.0
+        lbl = NSTextField.labelWithString_("")
+        lbl.setFont_(NSFont.boldSystemFontOfSize_(13))
+        lbl.setTextColor_(NSColor.labelColor())
+        lbl.setLineBreakMode_(4)   # truncate tail on narrow windows
+        lbl.setFrame_(NSMakeRect(32, (BAR_H - 18) / 2,
+                                 cw - 64 - NEXT_W - CANCEL_W - BACK_W - 3 * GAP - 12, 18))
+        lbl.setAutoresizingMask_(2)
+        bar.addSubview_(lbl)
+        self._labels_setup_lbl = lbl
+        x = cw - 32
+        for title, bg, press, action, w in (
+                ("Next  →", "#8c2232", "#6b1a26", self._setup_next, NEXT_W),
+                ("Cancel", "#3a3a3c", "#2c2c2e", self._setup_cancel, CANCEL_W),
+                ("←  Back", "#3a3a3c", "#2c2c2e", self._setup_back, BACK_W)):
+            x -= w
+            b = ActionButton.alloc().initWithFrame_(NSMakeRect(x, (BAR_H - BTN_H) / 2, w, BTN_H))
+            b.configureTitle_bg_press_action_(title, bg, press, action)
+            b.setAutoresizingMask_(1)
+            bar.addSubview_(b)
+            x -= GAP
+
         # ── Init state ────────────────────────────────────────────────────────
-        config = self.app.session if self.app else DEFAULT_SESSION
-        custom = config.get("custom_steps", DEFAULT_SESSION["custom_steps"])
+        custom = self._non_player_steps()
         self._labels_active_step  = custom[0]["id"] if custom else None
         self._labels_row_observers = []
 
@@ -5552,12 +6229,11 @@ class TagWindowV2:
         for v in list(steps_doc.subviews()):
             v.removeFromSuperview()
 
-        config = self.app.session if self.app else DEFAULT_SESSION
-        custom = config.get("custom_steps", DEFAULT_SESSION["custom_steps"])
-
-        # Full ordered step list: Player (locked) + custom steps
-        all_steps = [{"id": "players", "label": "Player", "_locked": True}] + \
-                    [dict(s) for s in custom]
+        # This sport's steps in order. Player can move or be turned off like any
+        # step, but its name is fixed and its labels live on the Team tab.
+        all_steps = [dict(st, _locked=(st["id"] == "players"))
+                     for st in self._sport_step_list()]
+        player_off = not any(st["id"] == "players" for st in all_steps)
 
         cw      = steps_sv.frame().size.width or self._labels_content_w
         ROW_H   = 44.0
@@ -5572,7 +6248,7 @@ class TagWindowV2:
         n_ctrls  = 3   # ↑ ↓ ×
         ctrl_block_w = n_ctrls * CTRL_W + (n_ctrls - 1) * CTRL_GAP + 10
 
-        n        = len(all_steps)
+        n        = len(all_steps) + (1 if player_off else 0)
         total_h  = max(n * ROW_H + max(n - 1, 0) * ROW_GAP + 16,
                        steps_sv.frame().size.height)
         steps_doc.setFrame_(NSMakeRect(0, 0, cw, total_h))
@@ -5639,11 +6315,12 @@ class TagWindowV2:
                                                FORM_W - NUM_W - 20, 17))
                 row.addSubview_(fixed_lbl)
 
-                lock_lbl = NSTextField.labelWithString_("FIXED")
+                lock_lbl = NSTextField.labelWithString_("ROSTER · TEAM TAB")
                 lock_lbl.setFont_(NSFont.systemFontOfSize_(10))
                 lock_lbl.setTextColor_(NSColor.tertiaryLabelColor())
                 lock_lbl.setAlignment_(2)  # right
-                lock_lbl.setFrame_(NSMakeRect(FORM_W - 60, (ROW_H - 14) / 2, 50, 14))
+                lock_lbl.setFrame_(NSMakeRect(FORM_W - ctrl_block_w - 130,
+                                              (ROW_H - 14) / 2, 120, 14))
                 row.addSubview_(lock_lbl)
             else:
                 # Editable name field
@@ -5682,41 +6359,60 @@ class TagWindowV2:
                     obs, "fire:", "NSControlTextDidEndEditingNotification", tf)
                 self._labels_row_observers.append(obs)
 
-                # ↑ ↓ × controls
-                n_custom = len(custom)
-                custom_idx = next((ci for ci, s in enumerate(custom)
-                                   if s["id"] == step_id), None)
-                for ci, (sym, action, enabled) in enumerate([
-                    ("↑", lambda sid=step_id: self._labels_move_step(sid, -1),
-                     custom_idx is not None and custom_idx > 0),
-                    ("↓", lambda sid=step_id: self._labels_move_step(sid,  1),
-                     custom_idx is not None and custom_idx < n_custom - 1),
-                    ("×", lambda sid=step_id: self._labels_delete_step(sid),
-                     n_custom > 1),
-                ]):
-                    bx   = ctrl_x + ci * (CTRL_W + CTRL_GAP)
-                    cbtn = PillButton.alloc().initWithFrame_(
-                        NSMakeRect(bx, (ROW_H - CTRL_H) / 2, CTRL_W, CTRL_H))
-                    cbtn.layer().setCornerRadius_(5.0)
-                    cbtn.layer().setBackgroundColor_(
-                        _hex_color_alpha("#ffffff", 0.08 if enabled else 0.03).CGColor())
-                    clbl = NSTextField.labelWithString_(sym)
-                    clbl.setFont_(NSFont.systemFontOfSize_(12))
-                    clbl.setTextColor_(
-                        NSColor.labelColor() if enabled else NSColor.tertiaryLabelColor())
-                    clbl.setAlignment_(1)
-                    clbl.setFrame_(NSMakeRect(0, (CTRL_H - 16) / 2, CTRL_W, 16))
-                    cbtn.addSubview_(clbl)
-                    row.addSubview_(cbtn)
-                    if enabled:
-                        cbtn.setClickHandler_(lambda v, e, a=action: a())
+            # ↑ ↓ × controls (× on Player turns the step off for this sport)
+            ctrl_x = FORM_W - ctrl_block_w
+            n_all  = len(all_steps)
+            for ci, (sym, action, enabled) in enumerate([
+                ("↑", lambda sid=step_id: self._labels_move_step(sid, -1), i > 0),
+                ("↓", lambda sid=step_id: self._labels_move_step(sid,  1), i < n_all - 1),
+                ("×", lambda sid=step_id: self._labels_delete_step(sid),
+                 n_all > 1 and not (step_id != "players" and
+                                    sum(1 for st in all_steps
+                                        if st["id"] != "players") <= 1)),
+            ]):
+                bx   = ctrl_x + ci * (CTRL_W + CTRL_GAP)
+                cbtn = PillButton.alloc().initWithFrame_(
+                    NSMakeRect(bx, (ROW_H - CTRL_H) / 2, CTRL_W, CTRL_H))
+                cbtn.layer().setCornerRadius_(5.0)
+                cbtn.layer().setBackgroundColor_(
+                    _hex_color_alpha("#ffffff", 0.08 if enabled else 0.03).CGColor())
+                clbl = NSTextField.labelWithString_(sym)
+                clbl.setFont_(NSFont.systemFontOfSize_(12))
+                clbl.setTextColor_(
+                    NSColor.labelColor() if enabled else NSColor.tertiaryLabelColor())
+                clbl.setAlignment_(1)
+                clbl.setFrame_(NSMakeRect(0, (CTRL_H - 16) / 2, CTRL_W, 16))
+                cbtn.addSubview_(clbl)
+                row.addSubview_(cbtn)
+                if enabled:
+                    cbtn.setClickHandler_(lambda v, e, a=action: a())
 
             steps_doc.addSubview_(row)
             y -= ROW_GAP
 
+        if player_off:
+            y -= ROW_H
+            row = NSView.alloc().initWithFrame_(NSMakeRect(PAD_X, y, FORM_W, ROW_H))
+            row.setWantsLayer_(True)
+            row.layer().setCornerRadius_(10.0)
+            row.layer().setBorderWidth_(0.5)
+            row.layer().setBorderColor_(_hex_color_alpha("#ffffff", 0.10).CGColor())
+            off_lbl = NSTextField.labelWithString_(
+                "Player step is off for this sport, so clips are logged without a player.")
+            off_lbl.setFont_(NSFont.systemFontOfSize_(12))
+            off_lbl.setTextColor_(NSColor.secondaryLabelColor())
+            off_lbl.setFrame_(NSMakeRect(14, (ROW_H - 16) / 2, FORM_W - 150, 16))
+            row.addSubview_(off_lbl)
+            on_btn = ActionButton.alloc().initWithFrame_(
+                NSMakeRect(FORM_W - 124, (ROW_H - 28) / 2, 112, 28))
+            on_btn.configureTitle_bg_press_action_(
+                "Turn On Player", "#3a3a3c", "#2c2c2e", self._labels_turn_on_player)
+            row.addSubview_(on_btn)
+            steps_doc.addSubview_(row)
+            self._labels_player_on_btn = on_btn
+
         # Update sub-header to reflect active step name
-        config  = self.app.session if self.app else DEFAULT_SESSION
-        custom  = config.get("custom_steps", DEFAULT_SESSION["custom_steps"])
+        custom  = self._non_player_steps()
         active  = self._labels_active_step
         step_cfg = next((s for s in custom if s["id"] == active), None)
         step_lbl = step_cfg["label"] if step_cfg else ""
@@ -5748,19 +6444,35 @@ class TagWindowV2:
         if not hasattr(self, "_labels_copy_mt"):
             self._labels_copy_mt = MenuTarget.alloc().init()
 
-        config = self.app.session if self.app else DEFAULT_SESSION
-        custom = config.get("custom_steps", DEFAULT_SESSION["custom_steps"])
+        custom = self._non_player_steps()
         step_cfg  = next((s for s in custom if s["id"] == step_id), None)
         step_name = step_cfg["label"] if step_cfg else step_id
 
         def on_pick(target_sport):
             import copy
+            target_label = sport_info(target_sport)["name"]
+            session = self.app.session
+            if not any(st["id"] == step_id for st in sport_steps(session, target_sport)):
+                # Steps are per sport: offer to add this one rather than hide the labels
+                from AppKit import NSAlert
+                alert = NSAlert.alloc().init()
+                alert.setMessageText_(f"{target_label} has no {step_name} step")
+                alert.setInformativeText_(
+                    f"Add a {step_name} step to {target_label} and copy the labels into it? "
+                    "Its other steps are not changed.")
+                alert.addButtonWithTitle_("Add Step and Copy")
+                alert.addButtonWithTitle_("Cancel")
+                if alert.runModal() != 1000:
+                    return
+                target_steps = own_sport_steps(session, target_sport)
+                target_steps.insert(max(0, len(target_steps) - 1),
+                                    {"id": step_id, "label": step_name})
+                self._save_session()
             sc_data = self.app._shortcuts_data
             if target_sport not in sc_data:
                 sc_data[target_sport] = default_shortcuts(target_sport)
             sc_data[target_sport][step_id] = copy.deepcopy(items)
             self.app._save_shortcuts()
-            target_label = SPORTS[target_sport]["label"].split("  ", 1)[-1].strip()
             rumps.alert("Copied",
                         f"{len(items)} {step_name} shortcut{'s' if len(items) != 1 else ''} "
                         f"copied to {target_label}.")
@@ -5768,7 +6480,7 @@ class TagWindowV2:
         self._labels_copy_mt._callback = on_pick
         menu = NSMenu.alloc().init()
         menu.setAutoenablesItems_(False)
-        for key, info in SPORTS.items():
+        for key, info in all_sports().items():
             if key == current_sport:
                 continue
             mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -5786,14 +6498,14 @@ class TagWindowV2:
         name = tf.stringValue().strip()
         if not name:
             return
-        config  = self.app.session if self.app else DEFAULT_SESSION
-        custom  = config.get("custom_steps", DEFAULT_SESSION["custom_steps"])
-        step    = next((s for s in custom if s["id"] == step_id), None)
+        if step_id == "players":
+            return
+        step = next((s for s in self._sport_step_list() if s["id"] == step_id), None)
         if step is None or step["label"] == name:
             return
+        step = next(s for s in self._own_step_list() if s["id"] == step_id)
         step["label"] = name
-        if self.app:
-            save_json(CONFIG_FILE, self.app.session)
+        self._save_session()
         self._rebuild_steps()
         self._build_step_circles()
         if step_id in getattr(self, "_sc_titles", {}):
@@ -5844,8 +6556,7 @@ class TagWindowV2:
         container_h = max(total_h, viewport_h)
         container.setFrame_(NSMakeRect(0, 0, cw, container_h))
 
-        config  = self.app.session if self.app else DEFAULT_SESSION
-        custom  = config.get("custom_steps", DEFAULT_SESSION["custom_steps"])
+        custom  = self._non_player_steps()
         step_cfg = next((s for s in custom if s["id"] == step_id), None)
         step_lbl = step_cfg["label"] if step_cfg else step_id
 
@@ -5939,8 +6650,7 @@ class TagWindowV2:
         step_id = getattr(self, "_labels_active_step", None)
         if step_id is None:
             return
-        config  = self.app.session if self.app else DEFAULT_SESSION
-        custom  = config.get("custom_steps", DEFAULT_SESSION["custom_steps"])
+        custom  = self._non_player_steps()
         step_cfg = next((s for s in custom if s["id"] == step_id), None)
         step_lbl = step_cfg["label"] if step_cfg else "Item"
 
@@ -6236,58 +6946,148 @@ class TagWindowV2:
             name = field.stringValue().strip()
             if not name:
                 return
-            new_id   = f"step_{uuid.uuid4().hex[:8]}"
-            config   = self.app.session if self.app else DEFAULT_SESSION
-            custom   = config.get("custom_steps", list(DEFAULT_SESSION["custom_steps"]))
+            new_id = f"step_{uuid.uuid4().hex[:8]}"
+            steps  = self._own_step_list()
             # Insert before the last step (treat last as "rating-like" finale)
-            insert_at = max(0, len(custom) - 1)
-            custom.insert(insert_at, {"id": new_id, "label": name})
-            if self.app:
-                self.app.session["custom_steps"] = custom
-                save_json(CONFIG_FILE, self.app.session)
+            steps.insert(max(0, len(steps) - 1), {"id": new_id, "label": name})
+            self._save_session()
             self._labels_active_step = new_id
             self._apply_steps_change()
 
     def _labels_delete_step(self, step_id):
+        """Remove a step from this sport only. On Player it turns the step off."""
         from AppKit import NSAlert
-        config  = self.app.session if self.app else DEFAULT_SESSION
-        custom  = config.get("custom_steps", DEFAULT_SESSION["custom_steps"])
-        step    = next((s for s in custom if s["id"] == step_id), None)
-        if step is None or len(custom) <= 1:
+        steps = self._sport_step_list()
+        step  = next((s for s in steps if s["id"] == step_id), None)
+        if step is None or len(steps) <= 1:
             return
+        others = [s for s in steps if s["id"] != "players"]
+        if step_id != "players" and len(others) <= 1:
+            return   # keep at least one labeling step
+        sport = sport_info(self._current_sport())["name"]
 
         alert = NSAlert.alloc().init()
-        alert.setMessageText_(f"Delete step \"{step['label']}\"?")
-        alert.setInformativeText_("All shortcuts in this step will also be removed.")
-        alert.addButtonWithTitle_("Delete")
+        if step_id == "players":
+            alert.setMessageText_("Turn off the Player step?")
+            alert.setInformativeText_(
+                f"Clips for {sport.strip()} will be logged without a player. "
+                "The roster is kept, and you can turn the step back on anytime. "
+                "Other sports are not changed.")
+            alert.addButtonWithTitle_("Turn Off")
+        else:
+            alert.setMessageText_(f"Delete step \"{step['label']}\"?")
+            alert.setInformativeText_(
+                f"Its shortcuts for {sport.strip()} will also be removed. "
+                "Other sports are not changed.")
+            alert.addButtonWithTitle_("Delete")
         alert.addButtonWithTitle_("Cancel")
 
         if alert.runModal() == 1000:
-            custom.remove(step)
-            self.shortcuts.pop(step_id, None)
-            if self.app:
-                save_json(CONFIG_FILE, self.app.session)
-            self.app._save_shortcuts()
-            self._labels_active_step = custom[0]["id"] if custom else None
+            own = self._own_step_list()
+            own[:] = [s for s in own if s["id"] != step_id]
+            if step_id != "players":
+                self.shortcuts.pop(step_id, None)
+                if self.app:
+                    self.app._save_shortcuts()
+            self._save_session()
+            remaining = [s for s in own if s["id"] != "players"]
+            if self._labels_active_step == step_id:
+                self._labels_active_step = remaining[0]["id"] if remaining else None
+            self._apply_steps_change()
+
+    def _labels_copy_steps_from(self):
+        """Set this sport up like another: same steps, in order, with copies of their labels."""
+        from AppKit import NSMenu, NSMenuItem, NSPoint
+        if not self.app:
+            return
+        current = self._current_sport()
+        if not hasattr(self, "_labels_copy_steps_mt"):
+            self._labels_copy_steps_mt = MenuTarget.alloc().init()
+
+        def on_pick(source):
+            if self._copy_steps_from_sport(source, ask=True):
+                self._apply_steps_change()
+
+        self._labels_copy_steps_mt._callback = on_pick
+        menu = NSMenu.alloc().init()
+        menu.setAutoenablesItems_(False)
+        for key, info in all_sports().items():
+            if key == current:
+                continue
+            mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                info["label"], "menuPicked:", "")
+            mi.setTarget_(self._labels_copy_steps_mt)
+            mi.setRepresentedObject_(key)
+            menu.addItem_(mi)
+        btn = getattr(self, "_labels_copy_steps_btn", None)
+        if btn is not None:
+            menu.popUpMenuPositioningItem_atLocation_inView_(None, NSPoint(0, 0), btn)
+
+    def _copy_steps_from_sport(self, source, ask=True):
+        """Replace this sport's steps and their labels with copies of source's.
+        The roster is never touched. Returns True when anything changed."""
+        import copy
+        from AppKit import NSAlert
+        session = self.app.session
+        has_labels = any(self.shortcuts.get(s["id"]) for s in self._non_player_steps())
+        if ask and has_labels:
+            src_name = sport_info(source)["name"]
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(f"Copy steps from {src_name}?")
+            alert.setInformativeText_(
+                f"This sport's steps and labels will be replaced with copies of {src_name}'s. "
+                "The roster is kept, and other sports are not changed.")
+            alert.addButtonWithTitle_("Replace")
+            alert.addButtonWithTitle_("Cancel")
+            if alert.runModal() != 1000:
+                return False
+        src_steps = copy.deepcopy(sport_steps(session, source))
+        src_sc = (self.app._shortcuts_data.get(source)
+                  or default_shortcuts(source))
+        own = own_sport_steps(session, self._current_sport())
+        for st in own:
+            if st["id"] != "players":
+                self.shortcuts.pop(st["id"], None)
+        own[:] = src_steps
+        for st in src_steps:
+            if st["id"] != "players":
+                self.shortcuts[st["id"]] = copy.deepcopy(src_sc.get(st["id"], []))
+        self._save_session()
+        self.app._save_shortcuts()
+        return True
+
+    def _labels_turn_on_player(self):
+        own = self._own_step_list()
+        if not any(s["id"] == "players" for s in own):
+            own.insert(0, dict(PLAYER_STEP))
+            self._save_session()
             self._apply_steps_change()
 
     def _labels_move_step(self, step_id, direction):
-        config = self.app.session if self.app else DEFAULT_SESSION
-        custom = config.get("custom_steps", DEFAULT_SESSION["custom_steps"])
-        idx    = next((i for i, s in enumerate(custom) if s["id"] == step_id), None)
+        steps = self._own_step_list()
+        idx   = next((i for i, s in enumerate(steps) if s["id"] == step_id), None)
         if idx is None:
             return
         new_idx = idx + direction
-        if not (0 <= new_idx < len(custom)):
+        if not (0 <= new_idx < len(steps)):
             return
-        custom[idx], custom[new_idx] = custom[new_idx], custom[idx]
-        if self.app:
-            save_json(CONFIG_FILE, self.app.session)
+        steps[idx], steps[new_idx] = steps[new_idx], steps[idx]
+        self._save_session()
         self._apply_steps_change()
 
+    def _save_session(self):
+        if self.app:
+            save_json(CONFIG_FILE, self.app.session)
+
     def _apply_steps_change(self):
-        """Rebuild all step-dependent UI after custom_steps changes."""
+        """Rebuild all step-dependent UI after this sport's steps change, or the sport does."""
+        if self.step is not None or self._tag_parts:
+            self._search_mode = False
+            self.handle_key("\x1b")    # cancel any log in progress first
         self._rebuild_steps()
+        ids = [s["id"] for s in self._non_player_steps()]
+        if getattr(self, "_labels_active_step", None) not in ids:
+            self._labels_active_step = ids[0] if ids else None
         self._rebuild_labels_rows()
         self._refresh_labels_grid()
         self._rebuild_sc_cards()
@@ -7890,7 +8690,7 @@ class TagWindowV2:
 
         # Sport label — left-anchored (autoresizingMask 8 = flex right margin)
         sport_key   = self.app.session.get("sport", "MBB") if self.app else "MBB"
-        sport_label = SPORTS.get(sport_key, SPORTS["MBB"])["label"].strip()
+        sport_label = sport_info(sport_key)["label"].strip()
         sport_lbl = NSTextField.labelWithString_(sport_label)
         sport_lbl.setFont_(NSFont.boldSystemFontOfSize_(12))
         sport_lbl.setTextColor_(_hex_color_alpha(COLOR_TAN, 0.75))
@@ -7985,7 +8785,7 @@ class TagWindowV2:
     def _refresh_stats(self):
         if hasattr(self, "_stats_sport_lbl") and self.app:
             sport_key   = self.app.session.get("sport", "MBB")
-            sport_label = SPORTS.get(sport_key, SPORTS["MBB"])["label"].strip()
+            sport_label = sport_info(sport_key)["label"].strip()
             self._stats_sport_lbl.setStringValue_(sport_label)
         idx = getattr(self, "_stats_active_tab", 0)
         if idx == 0:
@@ -8284,7 +9084,7 @@ class TagWindowV2:
     def _reset_stats(self):
         from AppKit import NSAlert
         sport_key   = self.app.session.get("sport", "MBB") if self.app else "MBB"
-        sport_label = SPORTS.get(sport_key, SPORTS["MBB"])["label"].strip()
+        sport_label = sport_info(sport_key)["label"].strip()
         alert = NSAlert.alloc().init()
         alert.setMessageText_(f"Reset {sport_label} stats?")
         alert.setInformativeText_(
@@ -8857,7 +9657,7 @@ class TagWindowV2:
                  "Set up your session once, then use Log Mode to tag each clip — the label "
                  "appends directly to the filename."),
                 ("subhead", "LOGGING FLOW"),
-                ("para", "Player  →  [custom steps]  →  final step"),
+                ("para", "Player  →  [custom steps]  →  final step   (each sport sets its own steps)"),
                 ("subhead", "NAVIGATION"),
                 ("table", [
                     ("Log",      "Tag video files with shortcut keys"),
@@ -8954,6 +9754,19 @@ class TagWindowV2:
                  "The pill button at the top shows the active sport "
                  "(e.g. ▸ 🏀 Men's Basketball ▾). Click it to switch sports — "
                  "the roster and session update automatically."),
+                ("subhead", "ADDING YOUR OWN SPORT"),
+                ("para",
+                 "Choose 'Add Sport…' at the bottom of the sport picker. Step 1: give it a name, "
+                 "a short code for file names (filled in for you), an emoji, and optionally the "
+                 "school site name used in roster URLs (/sports/<name>/roster). Start blank or "
+                 "copy another sport's steps and labels. Step 2: set up steps and labels on the "
+                 "Labels tab, then click Next. Step 3: review and Finish, with an offer to fetch "
+                 "the roster. Cancel during setup discards the new sport."),
+                ("para",
+                 "'Edit Sports…' renames your own sports, changes their emoji or site name, or "
+                 "deletes them. Deleting removes the sport's steps, labels, roster and naming "
+                 "presets, never video files or stats. Codes can't be changed, and built-in "
+                 "sports can't be edited."),
                 ("subhead", "LOADING A ROSTER"),
                 ("para",
                  "Click 'Fetch All Rosters ↓' to automatically pull current rosters from "
@@ -8968,19 +9781,27 @@ class TagWindowV2:
             ]),
             ("Labels", [
                 ("para",
-                 "The Labels tab configures the shortcut banks for all logging steps after "
-                 "Player. Each step has its own set of shortcut keys."),
+                 "The Labels tab configures the logging steps and shortcut banks for the "
+                 "sport shown in its header. Each sport has its own steps, so changes here "
+                 "never affect other sports."),
                 ("subhead", "CONFIGURING STEPS"),
                 ("para",
                  "The step-order list shows every step in the logging sequence. "
-                 "Player is always first and cannot be moved or removed. "
-                 "Custom steps appear below it."),
+                 "Player can move anywhere in the order, or be turned off with × for sports "
+                 "logged without a player. Its names come from the Team tab."),
                 ("bullets", [
                     "Click '+ Add Step' to add a new logging step",
+                    "Click 'Copy Steps From…' to use another sport's steps and labels",
                     "Click a step's numbered badge to select it and manage its shortcuts",
                     "Edit the step name inline — the Log Mode card updates automatically",
                     "Use ↑ ↓ to reorder steps, × to delete",
+                    "'Copy to →' offers to add the step to a sport that doesn't have it",
                 ]),
+                ("para",
+                 "Stats follow the steps: the player comes from the Player step, the rating "
+                 "from the last step, and the play from the steps in between. Press = to log "
+                 "another player on the same clip; labels picked before Player apply to "
+                 "every player."),
                 ("subhead", "MANAGING SHORTCUTS"),
                 ("bullets", [
                     "Click the pencil icon to edit a key or label",
@@ -9268,6 +10089,7 @@ class BasketballRenamerApp(rumps.App):
     def __init__(self):
         super().__init__("🪵", quit_button=None)
         self.session          = load_json(CONFIG_FILE, DEFAULT_SESSION)
+        set_custom_sports(self.session.get("custom_sports", []))
         raw                   = load_json(SHORTCUTS_FILE, {})
         self._shortcuts_data  = self._migrate_shortcuts(raw)
         sport                 = self.session.get("sport", "MBB")
@@ -9334,7 +10156,7 @@ class BasketballRenamerApp(rumps.App):
     def _build_menu(self):
         self.menu.clear()
         s = self.session
-        sport_label = SPORTS.get(s.get("sport",""), {}).get("label", s.get("sport",""))
+        sport_label = sport_info(s.get("sport", ""))["label"]
         self.menu.add(rumps.MenuItem(
             f"  {sport_label}  |  vs {s['opponent']}  |  {s['videographer']}  |  {s['phase']}  "
             f"|  {Path(s['folder']).name or 'No folder'}"))
@@ -9358,7 +10180,7 @@ class BasketballRenamerApp(rumps.App):
     def setup_session(self, _):
         s = dict(self.session)
         fields = [
-            ("sport",        "Sport Code",           f"Options: {', '.join(SPORT_OPTIONS)}"),
+            ("sport",        "Sport Code",           f"Options: {', '.join(all_sports())}"),
             ("opponent",     "Opponent",              "e.g. MIAMI"),
             ("videographer", "Videographer Initials", "e.g. AB"),
             ("phase",        "Game Phase",            f"Options: {', '.join(PHASE_OPTIONS)}"),
@@ -9478,7 +10300,7 @@ class BasketballRenamerApp(rumps.App):
             save_json(ROSTERS_META_FILE, meta)
             if not silent:
                 rumps.alert("✅ Roster Loaded",
-                            f"{SPORTS[sport_key]['label']}\n\n"
+                            f"{sport_info(sport_key)['label']}\n\n"
                             f"{len(names)} players loaded:\n" +
                             "\n".join(f"[{sc['key']}]  {sc['label']}" for sc in shortcuts[:15]) +
                             ("\n…" if len(shortcuts) > 15 else ""))
@@ -9528,14 +10350,9 @@ class BasketballRenamerApp(rumps.App):
                 win._refresh_players_grid()
             if hasattr(win, "_update_sport_pill"):
                 win._update_sport_pill(sport_key)
-            if hasattr(win, "_refresh_labels_grid"):
-                win._refresh_labels_grid()
-            if hasattr(win, "_rebuild_sc_cards"):
-                win._rebuild_sc_cards()
-                # Hide all sc_cards if we switched sport while not in the log section
-                if win.current_section != "tag" and hasattr(win, "_sc_cards"):
-                    for card in win._sc_cards.values():
-                        card.setHidden_(True)
+            if hasattr(win, "_apply_steps_change"):
+                # Each sport has its own steps: rebuild circles, cards and Labels rows
+                win._apply_steps_change()
         caller = MainCaller.alloc().init()
         caller._cb = refresh
         caller.performSelectorOnMainThread_withObject_waitUntilDone_(
