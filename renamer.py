@@ -8574,11 +8574,6 @@ class BasketballRenamerApp(rumps.App):
         self.menu.add(rumps.MenuItem("Open Window", callback=self.open_tag_mode_v2))
         self.menu.add(rumps.separator)
 
-        # ── DEV ──────────────────────────────────────────────────────────────
-        self.menu.add(rumps.MenuItem("🔄  Load Roster from School Website", callback=self.load_roster))
-        self.menu.add(rumps.MenuItem("⚙️  Setup Session",               callback=self.setup_session))
-        self.menu.add(rumps.separator)
-
         self.menu.add(rumps.MenuItem("Check for Updates…", callback=self._check_for_updates_menu))
         self.menu.add(rumps.MenuItem("Quit", callback=rumps.quit_application))
 
