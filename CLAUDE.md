@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Clips are logged through **Player → [custom steps]**, appending labels to the filename. Base names come from configurable presets via `resolve_convention`.
 
-All application logic is in one file, **`renamer.py`** (about 9,000 lines). Find things by symbol name; line numbers drift.
+All application logic is in one file, **`renamer.py`** (about 9,200 lines). Find things by symbol name; line numbers drift.
 
 ## Commands
 
@@ -39,7 +39,7 @@ gh release create vX.X.X "dist/EZLogger-X.X.X.dmg" --title "EZ Logger vX.X.X" --
 ```
 
 - Everything requires Homebrew Python 3.11 at `/opt/homebrew/bin/python3.11`.
-- `--sign` needs the Developer ID Application certificate (`3XQ36X2RC9`) and the Keychain notarize profile `ez-logger-notarize`. It signs nested `.so`, `.dylib` and Python binaries individually, because `--deep` alone fails notarization.
+- `--sign` needs the Developer ID Application certificate (`3XQ36X2RC9`) and the Keychain notarize profile `ez-logger-notarize`. It signs nested `.so`, `.dylib`, Python binaries **and Sparkle's plain `Autoupdate` binary** individually, because `--deep` alone fails notarization.
 - `--sign` notarizes and staples the **app**. The DMG around it is not signed or stapled.
 - The preview server only watches `renamer.py`. Touch it to reload after editing `preview.html`, which mirrors the AppKit layout in HTML/CSS. It needs `watchdog` for instant reloads and otherwise polls every second.
 
@@ -61,11 +61,12 @@ gh release create vX.X.X "dist/EZLogger-X.X.X.dmg" --title "EZ Logger vX.X.X" --
 
 These must never be violated:
 
-1. **All renames go through `SafeRenamer.safe_rename()`**, including undo. Never call `Path.rename()` or `os.rename()` directly.
+1. **All renames go through `SafeRenamer.safe_rename()`**, including undo. Never call `Path.rename()` or `os.rename()` directly. The only other moves are `SafeRenamer.safe_trash()` (to the Trash) and `SafeRenamer.safe_restore()` (back out of it, for undo).
 2. **No silent overwrites.** `safe_rename` refuses if `dst` exists as a different inode, and the caller must handle the `(False, reason)` return. The `conflict_behavior` setting supports only `"ask"` and `"skip"`.
 3. **Batch collisions are guarded.** `planned_names` stops two files in one batch sharing a target, and the 80% duplicate-stem check aborts when a naming convention has no unique fields.
 4. **All JSON writes are atomic.** Use `save_json` (writes `.tmp`, then `os.replace`). Never open a config file for writing directly.
 5. **Use `_save_setting(key, value)` for single settings.** `save_json(SETTINGS_FILE, partial_dict)` wipes every other setting.
+6. **Never delete clips permanently.** `safe_trash` uses `NSFileManager.trashItemAtURL` through `_trash_file`. A volume with no Trash fails, and nothing falls back to `os.remove` or `unlink`. Nothing in the app empties the Trash.
 
 `SafeRenamer.validate_file` also enforces the folder boundary after resolving symlinks, regular files only, top-level files only and video extensions only. `_log()` records every attempt and must never raise.
 
@@ -84,18 +85,34 @@ All paths are in `~`; constants are at the top of `renamer.py`.
 | `.bball_renamer_v3_rosters_meta.json` | Roster cache timestamps, checked against `roster_cache_days` |
 | `.bball_renamer_v3_key_presets.json` | Named hotkey layouts per sport |
 | `.ezlogger/rename_log.json` | Permanent log of every rename attempt |
-| `.ezlogger/tag_records.json` | `{tagged_filename: {"base", "colors"}}`, so relabeling replaces old labels |
+| `.ezlogger/tag_records.json` | `{tagged_filename: {"base", "colors", "reject"}}`, so relabeling replaces old labels; `reject` marks clips to trash |
 | `.ezlogger/crashes/` | Crash logs |
 | `Library/LaunchAgents/com.bball.renamer.plist` | Login item, written by `_set_launch_at_login`; only works from a built `.app` |
 
 ## Structure
 
 - **`SafeRenamer`**: the rename and validation layer.
-- **`TagWindowV2`**: the only window. Sections are selected by `_on_nav_select` using `NAV_ITEMS` keys. Keys don't all match labels: `"tag"` is Log Mode, `"players"` is Team, `"session"` is Naming.
+- **`TagWindowV2`**: the only window. Sections are selected by `_on_nav_select` using `NAV_ITEMS` keys. Keys don't all match labels: `"tag"` is Log Mode, `"players"` is Team, `"session"` is Naming. The default section on open is `"session"` (Naming).
 - **`BasketballRenamerApp`** (`rumps.App`): the entry point. Owns `session` and `shortcuts`, and handles `batch_rename`, `undo_last` and `switch_sport`. Opens the window shortly after launch and checks GitHub for updates on a background thread.
 - **`make_objc_classes()`**: defines all pyobjc subclasses lazily, once, so nothing registers before `NSApplication` initializes.
 
 `APP_VERSION` is the single source of the version string; `setup.py` reads it by regex. `_crash_handler` is `sys.excepthook`: it writes a local log and emails a report using a Gmail password from Keychain (service `ez-logger-crash-reporter`).
+
+**NAV_ITEMS order** (Naming first, then Log Mode, divider, then the rest):
+```python
+NAV_ITEMS = [
+    ("session",  "pencil",                    "Naming"),
+    ("tag",      "bolt.fill",                "Log Mode"),
+    ("players",  "person.2.fill",            "Team"),
+    (None, None, None),                       # divider
+    ("labels",   "list.bullet",              "Labels"),
+    ("stats",    "chart.bar.fill",           "Stats"),
+    ("settings", "slider.horizontal.3",      "Settings"),
+    ("help",     "questionmark.circle.fill", "Help"),
+]
+```
+
+**First-run tutorial:** `TutorialOverlay` (NSView subclass defined in `make_objc_classes()`) draws a scrim with a `kCGBlendModeClear` spotlight cutout. `TUTORIAL_STEPS` is a list of `(target_ref_attr, title, body)` tuples. Methods on `TagWindowV2`: `_start_tutorial`, `_show_tutorial_step`, `_dismiss_tutorial`, `_auto_start_tutorial`. Stored view refs: `_tutorial_folder_row`, `_tutorial_convention_sv`, `_tutorial_url_btn`. The `seen_tutorial` boolean in `DEFAULT_SETTINGS` gates auto-start; Settings has a "Replay Tutorial" `ActionButton` that calls `_dismiss_tutorial()` then `_start_tutorial()`.
 
 ## Naming and filenames
 
@@ -106,6 +123,8 @@ Presets live in two buckets: `naming_presets` (global, from `+ New` and `Dup`) a
 **Relabeling:** `_finalize_v2` takes the base from `tag_base_stem(stem, record)`, so a new tag replaces old labels. Never derive the base by counting filename segments, because conventions vary in length. Clips with no record keep their whole name as the base.
 
 **Batch Rename:** `_on_batch_rename` passes the Naming tab's selected clips (`_naming_selected`) to `batch_rename(_, only_names=...)`. An empty selection means the whole folder. After `batch_rename` or `undo_last`, call `_refresh_tag_window_files()`.
+
+**Move to Trash:** `BasketballRenamerApp.trash_clips(paths, folder)` confirms with `_confirm_trash_alert` (Return is Cancel), calls `safe_trash` for each clip, drops their tag records and pushes a `{"type": "trash", "items": [{name, trash_path, record_before}]}` undo entry. `undo_last` sends that type to `_undo_trash`, and `undo_op_available` decides whether any entry can still be undone. The Naming tab's trash button acts on `trash_targets(files, _naming_selected, _rejected)`: the selection, else the rejects. ⌘⌫ in its Clips list acts on the selection only. `_refresh_files` rebuilds `_rejected` from tag records, and `_style_reject_cell` strikes those rows through in both file lists. A reject survives Batch Rename; logging the clip clears it.
 
 ## Steps and the logging state machine
 
@@ -126,6 +145,8 @@ Flow: `handle_key` → `_handle_shortcut_key_v2` → ENTER → `_advance_step_v2
 | ⌥ Option | Toggles custom text mode; spaces are kept as typed |
 | ESC | Closes search first, otherwise cancels the log |
 | TAB | Next file, only when no step is active; doesn't wrap |
+| X | `_toggle_reject_current`: marks or unmarks a reject, only when no step is active; marking moves to the next file |
+| ⌘⌫ | `_trash_current_clip`, only when no step is active. `KeyTableView.keyDown_` catches it, since `handle_key` gets no modifiers |
 
 - **Stats:** `_finalize_v2` calls `log_stat` once per chain segment, excluding custom text. Within a segment, player is `[0]`, rating is `[-1]`, and play is the middle parts joined.
 - **Branches:** a shortcut's `children` open a sub-level through `_branch_stack` and `_branch_items`. The parent label is navigation only and is never added to the name. Nesting is one level deep. Search is off inside a branch.
@@ -172,6 +193,8 @@ Flow: `handle_key` → `_handle_shortcut_key_v2` → ENTER → `_advance_step_v2
   sv.reflectScrolledClipView_(sv.contentView())
   ```
 - For right-anchored buttons use `autoresizingMask = 1|8`. Flexible right margin (`4`) alone makes them drift left.
+- **Window snap / tile layout bug:** on macOS snap events `windowDidResize_` fires before AppKit has propagated autoresizing through the view tree, so `sv.frame().size.width` lags behind the new window size. In `_refresh_players_grid` and `_refresh_labels_grid`, always derive `cw` from `self.win.frame().size.width` minus the sidebar offset, falling back to `sv.frame()` only when that returns < 1.
+- **Help TOC autoresizing:** the TOC panel has `setAutoresizingMask_(16)` (flexible height, anchored at y=0). TOC buttons inside it must have `setAutoresizingMask_(8)` (NSViewMinYMargin — flexible bottom) so they stay anchored to the top of the panel as it resizes. Without it they stay at their initial y positions when the panel grows/shrinks after a snap.
 
 ## Conventions
 

@@ -562,3 +562,184 @@ def test_names_ending_in_time_are_not_treated_as_duplicates():
 
 def test_added_suffix_counts_as_a_duplicate():
     assert renamer.batch_base_stem("MBB_.mp4", False) == renamer.batch_base_stem("MBB__2.mp4", True)
+
+
+# ── Rejects and Move to Trash ─────────────────────────────────────────────────
+
+@pytest.fixture
+def quiet_log(tmp_path):
+    with patch.object(renamer, "RENAME_LOG_FILE", str(tmp_path / "log.json")):
+        yield tmp_path / "log.json"
+
+
+def _fake_trash(trash_dir):
+    """Stand-in for Finder's trash call: moves the file into trash_dir."""
+    def fn(path):
+        dst = Path(trash_dir) / Path(path).name
+        Path(path).rename(dst)
+        return True, str(dst), ""
+    return fn
+
+
+def test_set_reject_marks_and_unmarks_without_losing_base():
+    records = {"a.mp4": {"base": "A", "colors": []}}
+    renamer.set_reject(records, "a.mp4", True)
+    assert records["a.mp4"] == {"base": "A", "colors": [], "reject": True}
+    renamer.set_reject(records, "a.mp4", False)
+    assert records["a.mp4"] == {"base": "A", "colors": []}
+
+
+def test_set_reject_drops_empty_record():
+    records = {}
+    renamer.set_reject(records, "b.mp4", True)
+    assert records == {"b.mp4": {"reject": True}}
+    renamer.set_reject(records, "b.mp4", False)
+    assert records == {}
+
+
+def test_rejected_names_only_lists_present_clips():
+    records = {"a.mp4": {"reject": True}, "gone.mp4": {"reject": True},
+               "c.mp4": {"base": "C"}}
+    assert renamer.rejected_names(records, {"a.mp4", "c.mp4"}) == {"a.mp4"}
+
+
+def test_trash_targets_prefers_selection_then_rejects():
+    files = [Path("/f/a.mp4"), Path("/f/b.mp4"), Path("/f/c.mp4")]
+    assert [f.name for f in renamer.trash_targets(files, {"b.mp4"}, {"c.mp4"})] == ["b.mp4"]
+    assert [f.name for f in renamer.trash_targets(files, set(), {"c.mp4"})] == ["c.mp4"]
+    assert renamer.trash_targets(files, set(), set()) == []
+
+
+def test_trash_confirm_text_lists_five_then_counts_rest():
+    title, body = renamer.trash_confirm_text([f"c{i}.mp4" for i in range(7)])
+    assert title == "Move 7 clips to the Trash?"
+    assert "c4.mp4" in body and "c5.mp4" not in body
+    assert "+2 more" in body
+    assert renamer.trash_confirm_text(["one.mp4"])[0] == "Move 1 clip to the Trash?"
+
+
+def test_safe_trash_moves_file_and_logs(tmp_path, quiet_log):
+    folder = tmp_path / "clips"; folder.mkdir()
+    trash  = tmp_path / ".Trash"; trash.mkdir()
+    clip = folder / "clip.mp4"; clip.touch()
+    with patch.object(renamer, "_trash_file", _fake_trash(trash)):
+        ok, path = SafeRenamer.safe_trash(clip, folder)
+    assert ok and Path(path) == trash / "clip.mp4"
+    assert not clip.exists()
+    entry = renamer.json.loads(quiet_log.read_text().splitlines()[-1])
+    assert entry["action"] == "trash" and entry["success"]
+
+
+def test_safe_trash_refuses_files_it_could_not_rename(tmp_path, quiet_log):
+    folder = tmp_path / "clips"; folder.mkdir()
+    notes = folder / "notes.txt"; notes.touch()
+    called = []
+    with patch.object(renamer, "_trash_file", lambda p: called.append(p)):
+        ok, reason = SafeRenamer.safe_trash(notes, folder)
+    assert not ok and "extension" in reason
+    assert called == [] and notes.exists()
+
+
+def test_safe_trash_never_deletes_when_volume_has_no_trash(tmp_path, quiet_log):
+    folder = tmp_path / "clips"; folder.mkdir()
+    clip = folder / "clip.mp4"; clip.touch()
+    with patch.object(renamer, "_trash_file",
+                      lambda p: (False, "", "this drive has no Trash")):
+        ok, reason = SafeRenamer.safe_trash(clip, folder)
+    assert not ok and "no Trash" in reason
+    assert clip.exists()
+
+
+def test_safe_restore_round_trip(tmp_path, quiet_log):
+    folder = tmp_path / "clips"; folder.mkdir()
+    trash  = tmp_path / ".Trash"; trash.mkdir()
+    clip = folder / "clip.mp4"; clip.write_text("x")
+    with patch.object(renamer, "_trash_file", _fake_trash(trash)):
+        _, path = SafeRenamer.safe_trash(clip, folder)
+    ok, err = SafeRenamer.safe_restore(Path(path), folder / "clip.mp4", folder)
+    assert ok, err
+    assert clip.read_text() == "x"
+
+
+def test_safe_restore_never_overwrites(tmp_path, quiet_log):
+    folder = tmp_path / "clips"; folder.mkdir()
+    trash  = tmp_path / ".Trash"; trash.mkdir()
+    (trash / "clip.mp4").write_text("old")
+    (folder / "clip.mp4").write_text("new")
+    ok, err = SafeRenamer.safe_restore(trash / "clip.mp4", folder / "clip.mp4", folder)
+    assert not ok and "already" in err
+    assert (folder / "clip.mp4").read_text() == "new"
+    assert (trash / "clip.mp4").exists()
+
+
+def test_safe_restore_only_moves_out_of_trash(tmp_path, quiet_log):
+    folder = tmp_path / "clips"; folder.mkdir()
+    elsewhere = tmp_path / "other"; elsewhere.mkdir()
+    (elsewhere / "clip.mp4").touch()
+    ok, err = SafeRenamer.safe_restore(elsewhere / "clip.mp4", folder / "clip.mp4", folder)
+    assert not ok and "not in the Trash" in err
+
+
+def test_safe_restore_stays_inside_folder(tmp_path, quiet_log):
+    folder = tmp_path / "clips"; folder.mkdir()
+    (folder / "sub").mkdir()
+    trash  = tmp_path / ".Trash"; trash.mkdir()
+    (trash / "clip.mp4").touch()
+    ok, err = SafeRenamer.safe_restore(trash / "clip.mp4", folder / "sub" / "clip.mp4", folder)
+    assert not ok and "boundary" in err
+
+
+def test_undo_op_available_for_trash_entries(tmp_path):
+    present = tmp_path / "a.mp4"; present.touch()
+    op = {"type": "trash", "items": [{"name": "a.mp4", "trash_path": str(present)}]}
+    assert renamer.undo_op_available(op)
+    present.unlink()
+    assert not renamer.undo_op_available(op)
+
+
+def _trash_app(tmp_path):
+    app = renamer.BasketballRenamerApp.__new__(renamer.BasketballRenamerApp)
+    app.session = {}
+    app._refresh_undo_item = lambda: None
+    app._refresh_tag_window_files = lambda: None
+    return app
+
+
+def test_trash_clips_and_undo_restore_records(tmp_path, quiet_log):
+    folder = tmp_path / "clips"; folder.mkdir()
+    trash  = tmp_path / ".Trash"; trash.mkdir()
+    a = folder / "a.mp4"; a.touch()
+    b = folder / "b.mp4"; b.touch()
+    records_file = tmp_path / "records.json"
+    records_file.write_text(renamer.json.dumps(
+        {"a.mp4": {"base": "A", "reject": True}, "b.mp4": {"base": "B"}}))
+    undo_file = tmp_path / "undo.json"
+    app = _trash_app(tmp_path)
+    with patch.multiple(renamer, TAG_RECORDS_FILE=str(records_file),
+                        UNDO_FILE=str(undo_file),
+                        SETTINGS_FILE=str(tmp_path / "settings.json"),
+                        _trash_file=_fake_trash(trash)), \
+         patch.object(renamer.rumps, "alert", MagicMock(return_value=True), create=True):
+        assert app.trash_clips([a], folder, confirm=False) == 1
+        assert not a.exists() and (trash / "a.mp4").exists()
+        records = renamer.json.loads(records_file.read_text())
+        assert "a.mp4" not in records and "b.mp4" in records
+        stack = renamer.json.loads(undo_file.read_text())
+        assert stack[-1]["type"] == "trash"
+
+        app.undo_last(None)
+        assert a.exists() and not (trash / "a.mp4").exists()
+        records = renamer.json.loads(records_file.read_text())
+        assert records["a.mp4"] == {"base": "A", "reject": True}
+        assert renamer.json.loads(undo_file.read_text()) == []
+
+
+def test_trash_clips_cancelled_moves_nothing(tmp_path, quiet_log):
+    folder = tmp_path / "clips"; folder.mkdir()
+    a = folder / "a.mp4"; a.touch()
+    app = _trash_app(tmp_path)
+    with patch.object(renamer, "_confirm_trash_alert", lambda names: False), \
+         patch.object(renamer, "_trash_file", MagicMock()) as tf:
+        assert app.trash_clips([a], folder) == 0
+    tf.assert_not_called()
+    assert a.exists()

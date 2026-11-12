@@ -586,6 +586,51 @@ class SafeRenamer:
             return False, str(e)
 
     @staticmethod
+    def safe_trash(src: Path, folder_root: Path,
+                   session: dict = None) -> tuple[bool, str]:
+        """Move a clip to the Trash after the same checks as a rename.
+        Returns (True, trash_path) or (False, reason). Never deletes permanently."""
+        ok, reason = SafeRenamer.validate_file(src, folder_root)
+        if not ok:
+            SafeRenamer._log(src, Path("TRASH"), session, success=False,
+                             error=reason, action="trash")
+            return False, reason
+        ok, trash_path, err = _trash_file(src)
+        SafeRenamer._log(src, Path(trash_path or "TRASH"), session, success=ok,
+                         error=err, action="trash")
+        return (True, trash_path) if ok else (False, err)
+
+    @staticmethod
+    def safe_restore(trash_path: Path, dst: Path, folder_root: Path,
+                     session: dict = None) -> tuple[bool, str]:
+        """Put a trashed clip back at dst. Only moves files out of a Trash folder,
+        only to the top level of the session folder, and never overwrites."""
+        def fail(msg):
+            SafeRenamer._log(trash_path, dst, session, success=False,
+                             error=msg, action="restore")
+            return False, msg
+
+        if not _is_in_trash(trash_path):
+            return fail("source is not in the Trash")
+        if not os.path.isfile(str(trash_path)) or os.path.islink(str(trash_path)):
+            return fail("no longer in the Trash")
+        real_folder = os.path.realpath(str(folder_root))
+        if not os.path.isdir(real_folder):
+            return fail("session folder no longer exists")
+        if os.path.realpath(str(Path(dst).parent)) != real_folder:
+            return fail("destination is outside session folder boundary")
+        if Path(dst).suffix.lower() not in SafeRenamer.ALLOWED_EXTENSIONS:
+            return fail("not a supported video extension")
+        if os.path.lexists(str(dst)):
+            return fail(f"a file named {Path(dst).name} is already in the folder")
+        try:
+            Path(trash_path).rename(dst)
+        except Exception as e:
+            return fail(str(e))
+        SafeRenamer._log(trash_path, dst, session, success=True, action="restore")
+        return True, ""
+
+    @staticmethod
     def check_destination(src: Path, dst: Path) -> str:
         """Return a warning string if dst already exists and is not src, else ''."""
         if src.resolve() == dst.resolve():
@@ -595,11 +640,13 @@ class SafeRenamer:
         return ""
 
     @staticmethod
-    def _log(src: Path, dst: Path, session: dict, success: bool, error: str = ""):
+    def _log(src: Path, dst: Path, session: dict, success: bool, error: str = "",
+             action: str = "rename"):
         """Append one JSON-lines entry to RENAME_LOG_FILE (pure append, O(1))."""
         s = session or {}
         entry = {
             "timestamp": datetime.now().isoformat(),
+            "action":    action,
             "sport":     s.get("sport", ""),
             "opponent":  s.get("opponent", ""),
             "phase":     s.get("phase", ""),
@@ -919,6 +966,61 @@ def select_batch_files(files, only_names=None):
     return [f for f in files if f.name in only_names]
 
 
+def rejected_names(records, names):
+    """Return the clip names in `names` that are marked as rejects."""
+    return {n for n in names if (records.get(n) or {}).get("reject")}
+
+
+def set_reject(records, name, on):
+    """Mark or unmark a clip as a reject in the tag records, in place."""
+    rec = dict(records.get(name) or {})
+    if on:
+        rec["reject"] = True
+    else:
+        rec.pop("reject", None)
+    if rec:
+        records[name] = rec
+    else:
+        records.pop(name, None)
+
+
+def trash_targets(files, selected, rejected):
+    """Clips the Naming tab's trash button acts on: the selection, else the rejects."""
+    pick = selected if selected else rejected
+    return [f for f in files if f.name in pick]
+
+
+def undo_op_available(op):
+    """True when at least one file in an undo entry can still be put back."""
+    if op.get("type") == "trash":
+        return any(i.get("trash_path") and os.path.exists(i["trash_path"])
+                   for i in op.get("items", []))
+    folder = op.get("folder", "")
+    return any(os.path.exists(os.path.join(folder, r["new"]))
+               for r in op.get("renames", []))
+
+
+def _trash_file(path):
+    """Move one file to the Trash with Finder's API. Returns (ok, trash_path, error).
+    Never deletes: a volume with no Trash fails here instead."""
+    try:
+        from Foundation import NSFileManager, NSURL
+        url = NSURL.fileURLWithPath_(str(path))
+        ok, result_url, err = (NSFileManager.defaultManager()
+                               .trashItemAtURL_resultingItemURL_error_(url, None, None))
+        if ok:
+            return True, (str(result_url.path()) if result_url is not None else ""), ""
+        msg = str(err.localizedDescription()) if err is not None else ""
+        return False, "", msg or "this drive has no Trash"
+    except Exception as e:
+        return False, "", str(e)
+
+
+def _is_in_trash(path):
+    parts = Path(os.path.realpath(str(path))).parts
+    return ".Trash" in parts or ".Trashes" in parts
+
+
 # ── Finder color labels ───────────────────────────────────────────────────────
 FINDER_COLOR_HEX = {
     "Red": "#ff5f57", "Orange": "#ff9f0a", "Yellow": "#ffd60a", "Green": "#32d74b",
@@ -978,6 +1080,60 @@ def set_finder_tags(path, tags):
         return bool(ok)
     except Exception:
         return False
+
+
+def trash_confirm_text(names, shown=5):
+    """Title and body for the Move to Trash confirmation."""
+    n = len(names)
+    title = f"Move {n} clip{'' if n == 1 else 's'} to the Trash?"
+    listed = "\n".join(names[:shown])
+    if n > shown:
+        listed += f"\n+{n - shown} more"
+    body = (f"{listed}\n\nYou can put them back with Undo (⌘Z) "
+            "or from the Trash in Finder.")
+    return title, body
+
+
+def _confirm_trash_alert(names):
+    """Ask before trashing. Return is Cancel, so a stray keypress can't trash clips."""
+    from AppKit import NSAlert, NSApp
+    title, body = trash_confirm_text(names)
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_(title)
+    alert.setInformativeText_(body)
+    trash_btn  = alert.addButtonWithTitle_("Move to Trash")
+    cancel_btn = alert.addButtonWithTitle_("Cancel")
+    try:
+        trash_btn.setHasDestructiveAction_(True)
+    except Exception:
+        pass
+    trash_btn.setKeyEquivalent_("")
+    cancel_btn.setKeyEquivalent_("\r")
+    NSApp.activateIgnoringOtherApps_(True)
+    return alert.runModal() == 1000   # NSAlertFirstButtonReturn
+
+
+def _style_reject_cell(owner, cell, row):
+    """Strike through and dim a clip marked as a reject in a file list."""
+    if not owner or not (0 <= row < len(owner._files)):
+        return
+    name = owner._files[row].name
+    if name not in getattr(owner, "_rejected", ()):
+        return
+    from AppKit import (NSAttributedString, NSMutableParagraphStyle, NSColor,
+                        NSStrikethroughStyleAttributeName, NSFontAttributeName,
+                        NSForegroundColorAttributeName, NSParagraphStyleAttributeName)
+    para = NSMutableParagraphStyle.alloc().init()
+    para.setLineBreakMode_(3)
+    attrs = {
+        NSStrikethroughStyleAttributeName: 1,
+        NSForegroundColorAttributeName:    NSColor.tertiaryLabelColor(),
+        NSParagraphStyleAttributeName:     para,
+    }
+    if cell.font() is not None:
+        attrs[NSFontAttributeName] = cell.font()
+    cell.setAttributedStringValue_(
+        NSAttributedString.alloc().initWithString_attributes_(name, attrs))
 
 
 def log_stat(session, player, play, rating):
@@ -1284,6 +1440,11 @@ def make_objc_classes():
                 if self.owner and hasattr(self.owner, "handle_cmd_z"):
                     self.owner.handle_cmd_z()
                 return
+            # ⌘⌫ → move the current clip to the Trash
+            if chars == "\x7f" and (event.modifierFlags() & 0x100000):
+                if self.owner and hasattr(self.owner, "_trash_current_clip"):
+                    self.owner._trash_current_clip()
+                return
             if self.owner:
                 self.owner.handle_key(chars)
             else:
@@ -1483,6 +1644,7 @@ def make_objc_classes():
 
         def tableView_willDisplayCell_forTableColumn_row_(self, tv, cell, col, row):
             cell.setLineBreakMode_(3)  # NSLineBreakByTruncatingHead — shows end of filename where labels are
+            _style_reject_cell(self.owner, cell, row)
 
         def tableViewSelectionDidChange_(self, notif):
             if not self.owner:
@@ -1507,6 +1669,7 @@ def make_objc_classes():
 
         def tableView_willDisplayCell_forTableColumn_row_(self, tv, cell, col, row):
             cell.setLineBreakMode_(3)  # truncate the head so the end of the name stays visible
+            _style_reject_cell(self.owner, cell, row)
 
         def tableViewSelectionDidChange_(self, notif):
             if self.owner and not self._suppressed:
@@ -1536,6 +1699,11 @@ def make_objc_classes():
                 return
             if chars == "\x1b":   # ESC
                 close_quicklook()
+                return
+            # ⌘⌫ → trash the selected clips (selection only, never the rejects)
+            if chars == "\x7f" and (event.modifierFlags() & 0x100000):
+                if self.owner and self.owner._naming_selected:
+                    self.owner._naming_trash()
                 return
             is_arrow = key_code in (125, 126)   # down=125, up=126
             objc.super(_NamingClipsTable, self).keyDown_(event)
@@ -3155,6 +3323,11 @@ class TagWindowV2:
                         "⌫  Removed last label  ·  press a key or ENTER to advance")
             return
 
+        # X → mark or unmark the current clip as a reject (only between logs)
+        if key in ("x", "X") and self.step is None and not self._custom_mode:
+            self._toggle_reject_current()
+            return
+
         # + → chain: start a new player sequence on the same clip
         if key in ("+", "=") and self.step is not None and not self._custom_mode:
             self._chain_to_player()
@@ -3211,6 +3384,55 @@ class TagWindowV2:
     def handle_cmd_z(self):
         if self.app:
             self.app.undo_last(None)
+
+    # ── Rejects and Move to Trash ─────────────────────────────────────────────
+
+    def _select_file_row(self, idx):
+        from AppKit import NSIndexSet
+        self._file_list_table.selectRowIndexes_byExtendingSelection_(
+            NSIndexSet.indexSetWithIndex_(idx), False)
+        self._file_list_table.scrollRowToVisible_(idx)
+        self._on_file_selected(idx)
+
+    def _toggle_reject_current(self):
+        idx = self._selected_file_idx
+        if not (0 <= idx < len(self._files)):
+            return
+        name = self._files[idx].name
+        on = name not in self._rejected
+        records = load_json(TAG_RECORDS_FILE, {})
+        set_reject(records, name, on)
+        save_tag_records(records)
+        if on:
+            self._rejected.add(name)
+        else:
+            self._rejected.discard(name)
+        self._file_list_table.reloadData()
+        self._refresh_naming_clips()
+        if on:
+            # Move on first: selecting a clip resets the hint
+            if idx + 1 < len(self._files):
+                self._select_file_row(idx + 1)
+            self._set_v2_hint(
+                f"✕  Marked as reject ({len(self._rejected)})  ·  X to unmark  ·  "
+                "trash rejects from the Naming tab")
+        else:
+            self._set_v2_hint("Reject removed  ·  ENTER to log this clip")
+
+    def _trash_current_clip(self):
+        if self.step is not None:
+            self._set_v2_hint("Finish this log or press ESC before moving the clip to the Trash")
+            return
+        idx = self._selected_file_idx
+        if not self.app or not (0 <= idx < len(self._files)):
+            return
+        if self.app.trash_clips([self._files[idx]], self.folder):
+            self._set_v2_hint("🗑  Moved to the Trash  ·  ⌘Z to put it back")
+
+    def _naming_trash(self):
+        targets = trash_targets(self._files, self._naming_selected, self._rejected)
+        if self.app and targets:
+            self.app.trash_clips(targets, self.folder)
 
     # ── Branch helpers ────────────────────────────────────────────────────────
 
@@ -3734,6 +3956,7 @@ class TagWindowV2:
         scroll.setDocumentView_(table)
 
         self._files            = []
+        self._rejected         = set()   # clip names marked as rejects (X in Log Mode)
         self._selected_file_idx = -1
         self._file_list_delegate = FileListDelegate.alloc().init()
         self._file_list_delegate.owner = self
@@ -3813,6 +4036,8 @@ class TagWindowV2:
                 key=key_fn, reverse=rev)
         else:
             self._files = []
+        self._rejected = rejected_names(load_json(TAG_RECORDS_FILE, {}),
+                                        {f.name for f in self._files})
         if hasattr(self, "_file_list_table"):
             self._file_list_table.reloadData()
         if hasattr(self, "_empty_state_overlay"):
@@ -4448,7 +4673,13 @@ class TagWindowV2:
             return (0, int(k)) if k.isdigit() else (1, k.lower())
         items = sorted(self.shortcuts.get("players", []), key=_key_order)
         sv    = self._players_scrollview
-        cw    = sv.frame().size.width
+        # Derive width from window geometry — sv.frame() can lag on macOS snap/tile
+        # events where windowDidResize_ fires before autoresizing has propagated.
+        _W  = self.win.frame().size.width
+        _cx = self.SIDEBAR_W if self._sidebar_visible else 0
+        cw  = _W - _cx
+        if cw < 1:
+            cw = sv.frame().size.width
         if cw < 1:
             cw = self._players_content_w
 
@@ -5359,7 +5590,11 @@ class TagWindowV2:
 
         items = self.shortcuts.get(step_id, [])
         sv    = self._labels_scrollview
-        cw    = sv.frame().size.width
+        _W  = self.win.frame().size.width
+        _cx = self.SIDEBAR_W if self._sidebar_visible else 0
+        cw  = _W - _cx
+        if cw < 1:
+            cw = sv.frame().size.width
         if cw < 1:
             cw = self._labels_content_w
 
@@ -5948,6 +6183,7 @@ class TagWindowV2:
     # ── Naming section — clip selection for Batch Rename ─────────────────────
 
     NAMING_CLIPS_W     = 280.0
+    TRASH_BTN_COLORS   = ("#a3302a", "#7f2420")
     NAMING_CLIPS_MIN_W = 860.0   # below this content width the panel hides
 
     def _naming_form_area_w(self, cw):
@@ -5968,7 +6204,8 @@ class TagWindowV2:
         STATUS_H = 34.0
         show_thumb = panel_h >= 360.0
         clear_y   = PAD
-        preview_y = clear_y + BTN_H + GAP
+        trash_y   = clear_y + BTN_H + GAP
+        preview_y = trash_y + BTN_H + GAP
         scroll_y  = preview_y + BTN_H + GAP
         title_y   = panel_h - PAD - TITLE_H
         status_y  = title_y - GAP - STATUS_H
@@ -5979,7 +6216,7 @@ class TagWindowV2:
             thumb_y    = None
             scroll_top = status_y - GAP
         scroll_h = max(30.0, scroll_top - scroll_y)
-        return dict(clear_y=clear_y, preview_y=preview_y, scroll_y=scroll_y,
+        return dict(clear_y=clear_y, trash_y=trash_y, preview_y=preview_y, scroll_y=scroll_y,
                     scroll_h=scroll_h, title_y=title_y, status_y=status_y,
                     show_thumb=show_thumb, thumb_y=thumb_y, thumb_h=THUMB_H,
                     thumb_w=THUMB_W, title_h=TITLE_H, status_h=STATUS_H,
@@ -6073,6 +6310,14 @@ class TagWindowV2:
         panel.addSubview_(clear_btn)
         self._naming_clear_btn = clear_btn
 
+        trash_btn = ActionButton.alloc().initWithFrame_(
+            NSMakeRect(14, pos['trash_y'], PANEL_W - 28, BTN_H))
+        trash_btn.configureTitle_bg_press_action_(
+            "Move to Trash", *self.TRASH_BTN_COLORS, self._naming_trash)
+        trash_btn.setHidden_(True)
+        panel.addSubview_(trash_btn)
+        self._naming_trash_btn = trash_btn
+
         # ── Clip list ─────────────────────────────────────────────────────────
         scroll = NSScrollView.alloc().initWithFrame_(
             NSMakeRect(0, pos['scroll_y'], PANEL_W, pos['scroll_h']))
@@ -6149,6 +6394,17 @@ class TagWindowV2:
                         "Click, ⇧-click or ⌘-click to choose clips.")
             self._naming_clips_status.setStringValue_(text)
             self._naming_clear_btn.setHidden_(count == 0)
+        if hasattr(self, "_naming_trash_btn"):
+            n_rej = len(self._rejected)
+            if count:
+                trash_title = f"Move {count} to Trash"
+            elif n_rej:
+                trash_title = f"Trash {n_rej} Rejected"
+            else:
+                trash_title = "Move to Trash"
+            self._naming_trash_btn.configureTitle_bg_press_action_(
+                trash_title, *self.TRASH_BTN_COLORS, self._naming_trash)
+            self._naming_trash_btn.setHidden_(not (count or n_rej))
         if hasattr(self, "_batch_btn"):
             title = f"Batch Rename ({count})" if count else "Batch Rename"
             self._batch_btn.configureTitle_bg_press_action_(
@@ -6177,6 +6433,9 @@ class TagWindowV2:
         if hasattr(self, "_naming_clear_btn"):
             self._naming_clear_btn.setFrame_(
                 NSMakeRect(14, pos['clear_y'], PANEL_W - 28, pos['btn_h']))
+        if hasattr(self, "_naming_trash_btn"):
+            self._naming_trash_btn.setFrame_(
+                NSMakeRect(14, pos['trash_y'], PANEL_W - 28, pos['btn_h']))
         if hasattr(self, "_naming_clips_scroll"):
             self._naming_clips_scroll.setFrame_(
                 NSMakeRect(0, pos['scroll_y'], PANEL_W, pos['scroll_h']))
@@ -8440,6 +8699,26 @@ class TagWindowV2:
                  "Reverses the last logged rename and restores the clip's previous Finder color. "
                  "Works from the keyboard in Log Mode or from the menubar."),
             ]),
+            ("Removing Clips", [
+                ("para",
+                 "Clips you don't want can be moved to the Trash without leaving the app. "
+                 "Nothing is ever deleted for good: clips go to the macOS Trash, and ⌘Z "
+                 "puts them back with their labels. Every move asks first."),
+                ("subhead", "MARK REJECTS WHILE LOGGING  (X)"),
+                ("para",
+                 "In Log Mode, press X between logs to mark the clip as a reject. It's shown "
+                 "struck through and the next clip is selected. Press X again to unmark it. "
+                 "Logging a rejected clip clears the mark."),
+                ("subhead", "TRASH THEM WHEN YOU'RE DONE"),
+                ("para",
+                 "On the Naming tab, the Clips list has a 'Trash N Rejected' button. Select clips "
+                 "instead and it becomes 'Move N to Trash', acting on the selection only."),
+                ("subhead", "ONE CLIP AT A TIME  (⌘⌫)"),
+                ("para",
+                 "⌘⌫ moves the selected clip in Log Mode, or the selected clips in the Naming "
+                 "tab's Clips list, to the Trash. Drives without a Trash, like some network "
+                 "shares, refuse rather than delete."),
+            ]),
             ("Team & Roster", [
                 ("para", "The Team tab manages the player list for the active sport."),
                 ("subhead", "SPORT PICKER"),
@@ -8578,7 +8857,9 @@ class TagWindowV2:
                     ("Backspace",      "Remove the last label · delete a character in custom-insert mode"),
                     ("↑ / ↓",          "Move through player search results"),
                     ("TAB",            "Advance to the next file (only when not mid-tag)"),
-                    ("⌘Z",            "Undo the last logged file rename"),
+                    ("X",              "Mark or unmark the clip as a reject (only when not mid-tag)"),
+                    ("⌘⌫",            "Move the clip to the Trash (only when not mid-tag)"),
+                    ("⌘Z",            "Undo the last logged file rename or Move to Trash"),
                 ]),
                 ("subhead", "FILE LIST"),
                 ("table", [
@@ -8687,6 +8968,7 @@ class TagWindowV2:
             btn.setWantsLayer_(True)
             btn.layer().setCornerRadius_(8.0)
             btn.layer().setBackgroundColor_(NSColor.clearColor().CGColor())
+            btn.setAutoresizingMask_(8)  # flexible bottom — stays anchored to top as panel resizes
             t = MenuTarget.alloc().init()
             t._callback = lambda _, i=idx: self._help_scroll_to(i)
             btn.setTarget_(t)
@@ -9154,6 +9436,8 @@ class BasketballRenamerApp(rumps.App):
                 records.pop(r["new"], None)
                 if old_record:
                     r["record_before"] = old_record
+                    if old_record.get("reject"):
+                        records[r["new"]] = {"reject": True}   # a reject stays a reject
             save_tag_records(records)
             _max_stack = load_json(SETTINGS_FILE, DEFAULT_SETTINGS).get("undo_stack_size", 50)
             self._push_undo(snapshot, max_stack=_max_stack)
@@ -9353,6 +9637,10 @@ class BasketballRenamerApp(rumps.App):
         renames = op.get("renames", [])
         op_type = op.get("type", "rename")
 
+        if op_type == "trash":
+            self._undo_trash(stack, op)
+            return
+
         reversible = [r for r in renames
                       if os.path.exists(os.path.join(folder, r["new"]))]
         if not reversible:
@@ -9408,6 +9696,93 @@ class BasketballRenamerApp(rumps.App):
         rumps.alert("Done", "\n".join(parts))
         self._refresh_tag_window_files()
 
+    # ── Move to Trash ─────────────────────────────────────────────────────────
+
+    def trash_clips(self, paths, folder, confirm=True):
+        """Move clips to the Trash after confirming. Returns how many were moved.
+        Every move goes through SafeRenamer.safe_trash and can be undone."""
+        paths = [Path(p) for p in paths]
+        if not paths:
+            return 0
+        ok, err = SafeRenamer.validate_folder(folder)
+        if not ok:
+            rumps.alert("Can't Move to Trash", err)
+            return 0
+        if confirm and not _confirm_trash_alert([p.name for p in paths]):
+            return 0
+
+        folder_path = Path(folder)
+        records = load_json(TAG_RECORDS_FILE, {})
+        items, errors = [], []
+        for p in paths:
+            ok, result = SafeRenamer.safe_trash(p, folder_path, self.session)
+            if ok:
+                item = {"name": p.name, "trash_path": result}
+                rec = records.pop(p.name, None)
+                if rec:
+                    item["record_before"] = rec
+                items.append(item)
+            else:
+                errors.append(f"  {p.name}: {result}")
+
+        if items:
+            save_tag_records(records)
+            _max_stack = load_json(SETTINGS_FILE, DEFAULT_SETTINGS).get("undo_stack_size", 50)
+            self._push_undo({
+                "type": "trash",
+                "folder": str(folder_path),
+                "timestamp": datetime.now().isoformat(),
+                "items": items,
+                "renames": [],
+            }, max_stack=_max_stack)
+        if errors:
+            head = (f"Moved {len(items)} clip(s) to the Trash.\n" if items else
+                    "No clips were moved to the Trash.\n")
+            rumps.alert("Some Clips Weren't Moved",
+                        head + f"{len(errors)} clip(s) stayed in the folder:\n"
+                        + "\n".join(errors))
+        self._refresh_tag_window_files()
+        return len(items)
+
+    def _undo_trash(self, stack, op):
+        folder_path = Path(op.get("folder", ""))
+        items = [i for i in op.get("items", [])
+                 if i.get("trash_path") and os.path.exists(i["trash_path"])]
+        if not items:
+            stack.pop()
+            save_json(UNDO_FILE, stack)
+            self._refresh_undo_item()
+            rumps.alert("Nothing to Undo",
+                        "Those clips are no longer in the Trash.")
+            return
+        n = len(items)
+        if not rumps.alert(title="Undo Move to Trash",
+                           message=f"Put {n} clip(s) back into:\n{folder_path}\n\nContinue?",
+                           ok="Put Back", cancel="Cancel"):
+            return
+
+        restored, errors = 0, []
+        records = load_json(TAG_RECORDS_FILE, {})
+        for i in items:
+            ok, err = SafeRenamer.safe_restore(
+                Path(i["trash_path"]), folder_path / i["name"], folder_path, self.session)
+            if ok:
+                restored += 1
+                if "record_before" in i:
+                    records[i["name"]] = i["record_before"]
+            else:
+                errors.append(f"  {i['name']}: {err}")
+        save_tag_records(records)
+
+        stack.pop()
+        save_json(UNDO_FILE, stack)
+        self._refresh_undo_item()
+        parts = [f"Put back {restored} clip(s)."]
+        if errors:
+            parts.append(f"{len(errors)} clip(s) are still in the Trash:\n" + "\n".join(errors))
+        rumps.alert("Done", "\n".join(parts))
+        self._refresh_tag_window_files()
+
     def _refresh_tag_window_files(self):
         for attr in ("_tag_window_v2", "_tag_window"):
             win = getattr(self, attr, None)
@@ -9431,15 +9806,17 @@ class BasketballRenamerApp(rumps.App):
         # Find the top operation that still has at least one reversible file
         top = None
         for op in reversed(stack):
-            folder = op.get("folder", "")
-            if any(os.path.exists(os.path.join(folder, r["new"]))
-                   for r in op.get("renames", [])):
+            if undo_op_available(op):
                 top = op
                 break
 
         if top is None:
             self._undo_item._menuitem.setEnabled_(False)
             self._undo_item.title = "    ↩  Undo Rename"
+        elif top.get("type") == "trash":
+            n = len(top.get("items", []))
+            self._undo_item._menuitem.setEnabled_(True)
+            self._undo_item.title = f"    ↩  Undo Move to Trash ({n})"
         elif top.get("type") == "batch":
             self._undo_item._menuitem.setEnabled_(True)
             self._undo_item.title = "    ↩  Undo Batch Rename"
