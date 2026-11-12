@@ -743,3 +743,55 @@ def test_trash_clips_cancelled_moves_nothing(tmp_path, quiet_log):
         assert app.trash_clips([a], folder) == 0
     tf.assert_not_called()
     assert a.exists()
+
+
+# ── Keeping the file lists in sync with Finder ────────────────────────────────
+
+def test_match_renames_follows_inode_to_new_name():
+    old = {"a.mp4": 1, "b.mp4": 2, "c.mp4": 3}
+    new = {"a.mp4": 1, "b_LAYUP.mp4": 2, "d.mp4": 4}
+    assert renamer.match_renames(old, new) == {"b.mp4": "b_LAYUP.mp4"}
+
+
+def test_match_renames_ignores_deletes_and_additions():
+    assert renamer.match_renames({"a.mp4": 1}, {"b.mp4": 2}) == {}
+    assert renamer.match_renames({}, {"b.mp4": 2}) == {}
+
+
+def test_match_renames_ignores_name_swaps_onto_existing_names():
+    # b's inode now sits under a name that already existed: not a clean rename
+    old = {"a.mp4": 1, "b.mp4": 2}
+    new = {"a.mp4": 2}
+    assert renamer.match_renames(old, new) == {}
+
+
+def test_move_records_for_renames_keeps_labels_and_rejects():
+    records = {"b.mp4": {"base": "B", "colors": ["Red"], "reject": True}}
+    assert renamer.move_records_for_renames(records, {"b.mp4": "b2.mp4"})
+    assert records == {"b2.mp4": {"base": "B", "colors": ["Red"], "reject": True}}
+
+
+def test_move_records_for_renames_never_overwrites():
+    records = {"b.mp4": {"base": "B"}, "b2.mp4": {"base": "OTHER"}}
+    assert not renamer.move_records_for_renames(records, {"b.mp4": "b2.mp4"})
+    assert records["b2.mp4"] == {"base": "OTHER"}
+
+
+def test_pick_selection_stays_on_same_clip_when_rows_shift():
+    # A clip added above the selection must not move the selection to another clip
+    assert renamer.pick_selection(["a.mp4", "aa.mp4", "b.mp4"], "b.mp4", {}, 1) == 2
+
+
+def test_pick_selection_follows_rename():
+    names = ["a.mp4", "b_LAYUP.mp4"]
+    assert renamer.pick_selection(names, "b.mp4", {"b.mp4": "b_LAYUP.mp4"}, 1) == 1
+
+
+def test_pick_selection_clamps_when_clip_is_gone():
+    assert renamer.pick_selection(["a.mp4", "c.mp4"], "z.mp4", {}, 5) == 1
+    assert renamer.pick_selection(["a.mp4", "c.mp4"], "b.mp4", {}, 1) == 1
+
+
+def test_pick_selection_empty_or_nothing_selected():
+    assert renamer.pick_selection([], "a.mp4", {}, 0) == -1
+    assert renamer.pick_selection(["a.mp4"], None, {}, -1) == -1

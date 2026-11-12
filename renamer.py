@@ -966,6 +966,37 @@ def select_batch_files(files, only_names=None):
     return [f for f in files if f.name in only_names]
 
 
+def match_renames(old_inodes, new_inodes):
+    """Find clips renamed outside the app. Takes {name: inode} before and after a
+    scan; returns {old_name: new_name} for files whose inode moved to a new name."""
+    gone  = {ino: n for n, ino in old_inodes.items() if n not in new_inodes}
+    added = {ino: n for n, ino in new_inodes.items() if n not in old_inodes}
+    return {gone[ino]: added[ino] for ino in gone if ino in added}
+
+
+def move_records_for_renames(records, renames):
+    """Carry tag records (base, colors, reject) over to clips renamed outside the
+    app. Never replaces a record already stored under the new name. Returns True
+    when anything moved."""
+    moved = False
+    for old, new in renames.items():
+        if old in records and new not in records:
+            records[new] = records.pop(old)
+            moved = True
+    return moved
+
+
+def pick_selection(names, prev_name, renames, prev_idx):
+    """Row to select after the list reloads: the same clip, followed through a
+    rename, else the row where it was (clamped). -1 for an empty list."""
+    if not names or (prev_name is None and prev_idx < 0):
+        return -1   # nothing was selected, so don't pick a clip on the user's behalf
+    for candidate in (prev_name, renames.get(prev_name)):
+        if candidate and candidate in names:
+            return names.index(candidate)
+    return max(0, min(prev_idx, len(names) - 1))
+
+
 def rejected_names(records, names):
     """Return the clip names in `names` that are marked as rejects."""
     return {n for n in names if (records.get(n) or {}).get("reject")}
@@ -1111,6 +1142,59 @@ def _confirm_trash_alert(names):
     cancel_btn.setKeyEquivalent_("\r")
     NSApp.activateIgnoringOtherApps_(True)
     return alert.runModal() == 1000   # NSAlertFirstButtonReturn
+
+
+_folder_watch = None   # (FSEventStream, callback) for the session folder; one at a time
+
+
+def _watch_folder(folder, on_change):
+    """Call on_change on the main thread shortly after anything changes in folder,
+    including the folder itself moving. Replaces any earlier watch. Returns False
+    when FSEvents is unavailable; the window-focus refresh still covers that case."""
+    global _folder_watch
+    _stop_folder_watch()
+    if not folder or not os.path.isdir(str(folder)):
+        return False
+    try:
+        import FSEvents
+        from CoreFoundation import CFRunLoopGetMain, kCFRunLoopDefaultMode
+
+        def callback(stream, info, n, paths, flags, ids):
+            try:
+                on_change()
+            except Exception:
+                pass   # a refresh problem must never reach the crash reporter
+
+        stream = FSEvents.FSEventStreamCreate(
+            None, callback, None, [os.path.realpath(str(folder))],
+            FSEvents.kFSEventStreamEventIdSinceNow, 0.3,
+            FSEvents.kFSEventStreamCreateFlagWatchRoot)
+        if stream is None:
+            return False
+        FSEvents.FSEventStreamScheduleWithRunLoop(
+            stream, CFRunLoopGetMain(), kCFRunLoopDefaultMode)
+        if not FSEvents.FSEventStreamStart(stream):
+            FSEvents.FSEventStreamInvalidate(stream)
+            return False
+        _folder_watch = (stream, callback)   # keep the callback alive with the stream
+        return True
+    except Exception:
+        _folder_watch = None
+        return False
+
+
+def _stop_folder_watch():
+    global _folder_watch
+    if _folder_watch is None:
+        return
+    stream, _cb = _folder_watch
+    _folder_watch = None
+    try:
+        import FSEvents
+        FSEvents.FSEventStreamStop(stream)
+        FSEvents.FSEventStreamInvalidate(stream)
+    except Exception:
+        pass
 
 
 _cmd_z_target  = None   # the open TagWindowV2; ⌘Z in its window runs the app's Undo
@@ -1838,6 +1922,11 @@ def make_objc_classes():
             if self.owner:
                 self.owner._on_window_resize()
 
+        def windowDidBecomeKey_(self, notif):
+            # Back from Finder: catch changes FSEvents can miss (network drives)
+            if self.owner and hasattr(self.owner, "_on_folder_changed"):
+                self.owner._on_folder_changed()
+
     WindowDelegate = _WindowDelegate
 
     class _FilePanelResizer(NSView):
@@ -2405,6 +2494,7 @@ class TagWindowV2:
 
         # File list panel (tag section, left of cards)
         self._build_file_list(cv, W, H, SIDEBAR_W, TOP_H)
+        self._start_folder_watch()   # Finder changes show up without a manual refresh
 
         # Placeholder for non-Log Mode sections
         cx = SIDEBAR_W
@@ -3992,6 +4082,9 @@ class TagWindowV2:
         scroll.setDocumentView_(table)
 
         self._files            = []
+        self._file_inodes      = {}      # {name: inode} from the last scan, to spot Finder renames
+        self._folder_missing   = False
+        self._quiet_select     = False
         self._rejected         = set()   # clip names marked as rejects (X in Log Mode)
         self._selected_file_idx = -1
         self._file_list_delegate = FileListDelegate.alloc().init()
@@ -4055,38 +4148,130 @@ class TagWindowV2:
         self._empty_state_overlay = ov
         self._empty_state_msg     = msg
 
-    def _refresh_files(self):
-        if self.folder and self.folder.is_dir():
-            sort = self._settings.get("file_sort_order", "name_asc")
-            if sort == "name_desc":
-                key_fn, rev = (lambda f: f.name), True
-            elif sort == "date_created":
-                key_fn = lambda f: getattr(f.stat(), "st_birthtime", f.stat().st_mtime)
-                rev = False
-            elif sort == "date_modified":
-                key_fn, rev = (lambda f: f.stat().st_mtime), False
-            else:
-                key_fn, rev = (lambda f: f.name), False
-            self._files = sorted(
-                [f for f in self.folder.iterdir() if is_video(f)],
-                key=key_fn, reverse=rev)
+    def _scan_folder(self):
+        """Return (sorted video files, {name: inode}); empty if the folder is gone.
+        A file that vanishes mid-scan is skipped."""
+        if not (self.folder and self.folder.is_dir()):
+            return [], {}
+        sort = self._settings.get("file_sort_order", "name_asc")
+        entries = []
+        try:
+            listing = list(self.folder.iterdir())
+        except OSError:
+            return [], {}
+        for f in listing:
+            if not is_video(f):
+                continue
+            try:
+                entries.append((f, f.stat()))
+            except OSError:
+                continue
+        if sort == "date_created":
+            key_fn = lambda e: getattr(e[1], "st_birthtime", e[1].st_mtime)
+        elif sort == "date_modified":
+            key_fn = lambda e: e[1].st_mtime
         else:
-            self._files = []
-        self._rejected = rejected_names(load_json(TAG_RECORDS_FILE, {}),
-                                        {f.name for f in self._files})
+            key_fn = lambda e: e[0].name
+        entries.sort(key=key_fn, reverse=(sort == "name_desc"))
+        return [f for f, _ in entries], {f.name: st.st_ino for f, st in entries}
+
+    def _refresh_files(self, external=False):
+        """Reload the clip lists from disk. The selection stays on the same clip,
+        following it through a rename. With external=True (a Finder change or the
+        window regaining focus), nothing redraws unless the clip names changed.
+        Returns True when the lists were rebuilt."""
+        prev_names = [f.name for f in self._files]
+        prev_idx   = self._selected_file_idx
+        prev_name  = prev_names[prev_idx] if 0 <= prev_idx < len(prev_names) else None
+
+        files, inodes = self._scan_folder()
+        names   = [f.name for f in files]
+        renames = match_renames(self._file_inodes, inodes) if self._file_inodes else {}
+        self._file_inodes = inodes
+
+        records = load_json(TAG_RECORDS_FILE, {})
+        if renames:
+            if move_records_for_renames(records, renames):
+                save_tag_records(records)
+            self._naming_selected = {renames.get(n, n) for n in self._naming_selected}
+
+        folder_missing = bool(self.folder) and not self.folder.is_dir()
+        if (external and names == prev_names and not renames
+                and folder_missing == self._folder_missing):
+            return False
+        self._folder_missing = folder_missing
+
+        self._files    = files
+        self._rejected = rejected_names(records, set(names))
+        new_idx = pick_selection(names, prev_name, renames, prev_idx)
+        self._selected_file_idx = new_idx
         if hasattr(self, "_file_list_table"):
-            self._file_list_table.reloadData()
+            from AppKit import NSIndexSet
+            table = self._file_list_table
+            self._quiet_select = True
+            try:
+                table.reloadData()
+                if new_idx >= 0:
+                    table.selectRowIndexes_byExtendingSelection_(
+                        NSIndexSet.indexSetWithIndex_(new_idx), False)
+                else:
+                    table.deselectAll_(None)
+            finally:
+                self._quiet_select = False
         if hasattr(self, "_empty_state_overlay"):
             show_empty = not bool(self._files)
             self._empty_state_overlay.setHidden_(not show_empty)
             if show_empty and hasattr(self, "_empty_state_msg"):
-                no_folder = not self.folder or not self.folder.is_dir()
-                self._empty_state_msg.setStringValue_(
-                    "No folder selected" if no_folder else "No video files found")
+                if folder_missing:
+                    msg = "Folder not found"
+                elif not self.folder:
+                    msg = "No folder selected"
+                else:
+                    msg = "No video files found"
+                self._empty_state_msg.setStringValue_(msg)
         self._refresh_naming_clips()
+
+        if prev_name is not None:
+            self._follow_selected_clip(prev_name, renames, new_idx, external)
+        return True
+
+    def _follow_selected_clip(self, prev_name, renames, new_idx, external):
+        """Keep the Now Logging card in step with the selected clip after a reload."""
+        now_name = self._files[new_idx].name if new_idx >= 0 else None
+        if now_name == prev_name:
+            return
+        if now_name is not None and renames.get(prev_name) == now_name:
+            # Same clip under a new name: keep any log in progress going
+            if hasattr(self, "_now_filename"):
+                self._now_filename.setStringValue_(now_name)
+            self._thumb_for_path = str(self._files[new_idx])
+            return
+        cancelled = self.step is not None
+        if cancelled:
+            # The clip being logged is gone, so finishing would rename the wrong one
+            self._search_mode = False
+            self.handle_key("\x1b")
+        if external and now_name is not None:
+            self._on_file_selected(new_idx)
+        elif now_name is None and hasattr(self, "_now_filename"):
+            self._now_filename.setStringValue_("")
+        if cancelled:   # after selecting, which resets the hint
+            self._set_v2_hint("⚠  The clip you were logging was removed or moved out "
+                              "of the folder, so the log was cancelled")
+
+    def _on_folder_changed(self):
+        """FSEvents or window focus: pick up changes made outside the app."""
+        if getattr(self, "_quiet_select", False):
+            return
+        self._refresh_files(external=True)
+
+    def _start_folder_watch(self):
+        _watch_folder(self.folder, self._on_folder_changed)
 
     def _on_file_selected(self, row):
         self._selected_file_idx = row
+        if getattr(self, "_quiet_select", False):
+            return   # _refresh_files restoring the selection; it updates the card itself
         if not (self._files and row < len(self._files)):
             return
         f = self._files[row]
@@ -6570,7 +6755,9 @@ class TagWindowV2:
                 save_json(CONFIG_FILE, self.app.session)
                 self.app._build_menu()
             self.folder = Path(folder)
+            self._file_inodes = {}   # a different folder: nothing here was renamed
             self._refresh_files()
+            self._start_folder_watch()
 
     # ── Naming section — layout helpers ──────────────────────────────────────
 

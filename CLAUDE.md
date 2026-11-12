@@ -55,6 +55,7 @@ gh release create vX.X.X "dist/EZLogger-X.X.X.dmg" --title "EZ Logger vX.X.X" --
   - `NSTableView`'s built-in click tracking doesn't respond to synthetic events.
   - Set `auto_open_on_launch: False` in seeded settings, or the launch timer opens a second window.
   - `screencapture -l` fails without Screen Recording permission. Render with `cacheDisplayInRect_toBitmapImageRep_` or the layer's `renderInContext_`. `cacheDisplay` shows translucent window areas as white.
+- To test a build without `build.sh` wiping `dist/` (and any DMG in it), run `python3.11 setup.py py2app --dist-dir <tmp>/dist --bdist-base <tmp>/build`.
 - After any UI change, check adjacent elements for spacing, text clipping, overlap and highlight bounds.
 
 ## Data safety invariants
@@ -123,6 +124,13 @@ Presets live in two buckets: `naming_presets` (global, from `+ New` and `Dup`) a
 **Relabeling:** `_finalize_v2` takes the base from `tag_base_stem(stem, record)`, so a new tag replaces old labels. Never derive the base by counting filename segments, because conventions vary in length. Clips with no record keep their whole name as the base.
 
 **Batch Rename:** `_on_batch_rename` passes the Naming tab's selected clips (`_naming_selected`) to `batch_rename(_, only_names=...)`. An empty selection means the whole folder. After `batch_rename` or `undo_last`, call `_refresh_tag_window_files()`.
+
+**Staying in sync with Finder:** `_watch_folder` runs one FSEvents stream on the session folder (main run loop, default mode, 0.3 s latency, `WatchRoot` so a moved or deleted folder is noticed). It calls `_on_folder_changed`, as does `windowDidBecomeKey_` as a backup for network drives. `_start_folder_watch` runs after the window builds and after Choose Folder; reset `_file_inodes` whenever the folder changes. `_refresh_files(external=True)` returns early when the names are unchanged, so the app's own renames and Finder-tag writes cause no redraw.
+- `_refresh_files` keeps the selection **by clip, not by row**: `pick_selection` follows the name, or the inode through a rename (`match_renames`). Finalize renames `self._files[self._selected_file_idx]`, so a row-based selection would rename the wrong clip once Finder adds or removes files.
+- Finder renames carry tag records to the new name (`move_records_for_renames`) and update `_naming_selected`.
+- `_follow_selected_clip` keeps a log going when its clip is renamed and cancels it, with a hint, when the clip is deleted.
+- While `_quiet_select` is set, `_on_file_selected` only stores the index; `_refresh_files` uses it to restore the selection without re-arming a log or reloading the thumbnail.
+- `setup.py` lists `FSEvents` and `CoreFoundation`. Without them the built app silently falls back to the focus refresh.
 
 **Move to Trash:** `BasketballRenamerApp.trash_clips(paths, folder)` confirms with `_confirm_trash_alert` (Return is Cancel), calls `safe_trash` for each clip, drops their tag records and pushes a `{"type": "trash", "items": [{name, trash_path, record_before}]}` undo entry. `undo_last` sends that type to `_undo_trash`, and `undo_op_available` decides whether any entry can still be undone. The Naming tab's trash button acts on `trash_targets(files, _naming_selected, _rejected)`: the selection, else the rejects. ⌘⌫ in its Clips list acts on the selection only. `_refresh_files` rebuilds `_rejected` from tag records, and `_style_reject_cell` strikes those rows through in both file lists. A reject survives Batch Rename; logging the clip clears it.
 
