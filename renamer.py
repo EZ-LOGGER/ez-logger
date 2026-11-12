@@ -79,6 +79,35 @@ sys.excepthook = _crash_handler
 # ── Update checker ────────────────────────────────────────────────────────────
 UPDATE_CHECK_URL = "https://api.github.com/repos/EZ-LOGGER/ez-logger/releases/latest"
 
+_sparkle_controller = None   # SPUStandardUpdaterController, set by _init_sparkle()
+
+def _init_sparkle():
+    """Load Sparkle.framework and start the auto-updater (main thread only)."""
+    global _sparkle_controller
+    try:
+        import objc
+        from Foundation import NSBundle
+        # In a built app the framework is in Contents/Frameworks/; in dev it's in Sparkle/
+        main_bundle = NSBundle.mainBundle()
+        candidates = [
+            main_bundle.bundlePath() + "/Contents/Frameworks/Sparkle.framework",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "Sparkle", "Sparkle.framework"),
+        ]
+        fw_path = next((p for p in candidates if os.path.exists(p)), None)
+        if fw_path is None:
+            return
+        bundle = NSBundle.bundleWithPath_(fw_path)
+        if not bundle.load():
+            return
+        SPUStandardUpdaterController = objc.lookUpClass("SPUStandardUpdaterController")
+        _sparkle_controller = (
+            SPUStandardUpdaterController.alloc()
+            .initWithStartingUpdater_updaterDelegate_userDriverDelegate_(True, None, None)
+        )
+    except Exception:
+        pass
+
 def _check_for_updates_bg(on_update_available):
     """Fetch latest GitHub release version in background. Calls on_update_available(version, url) if newer."""
     try:
@@ -8479,7 +8508,14 @@ class BasketballRenamerApp(rumps.App):
             except Exception:
                 pass
         rumps.Timer(self._auto_open, 0.1).start()
-        threading.Thread(target=self._run_update_check, daemon=True).start()
+        rumps.Timer(self._start_sparkle, 1.0).start()
+
+    def _start_sparkle(self, _timer):
+        _timer.stop()
+        _init_sparkle()
+        if _sparkle_controller is None:
+            # Running from source or Sparkle unavailable — fall back to notification
+            threading.Thread(target=self._run_update_check, daemon=True).start()
 
     def _run_update_check(self):
         def _notify(version, url):
@@ -8490,6 +8526,13 @@ class BasketballRenamerApp(rumps.App):
                 sound=False,
             )
         _check_for_updates_bg(_notify)
+
+    def _check_for_updates_menu(self, _):
+        if _sparkle_controller is not None:
+            _sparkle_controller.checkForUpdates_(None)
+        else:
+            import webbrowser
+            webbrowser.open("https://github.com/EZ-LOGGER/ez-logger/releases")
 
     def _migrate_shortcuts(self, data):
         """Migrate old flat {bank: [...]} format to nested {sport_key: {bank: [...]}}."""
@@ -8536,6 +8579,7 @@ class BasketballRenamerApp(rumps.App):
         self.menu.add(rumps.MenuItem("⚙️  Setup Session",               callback=self.setup_session))
         self.menu.add(rumps.separator)
 
+        self.menu.add(rumps.MenuItem("Check for Updates…", callback=self._check_for_updates_menu))
         self.menu.add(rumps.MenuItem("Quit", callback=rumps.quit_application))
 
     # ── Session setup ─────────────────────────────────────────────────────────

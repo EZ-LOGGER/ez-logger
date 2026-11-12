@@ -60,21 +60,35 @@ echo ""
 # ── Sign + Notarize (only with --sign flag) ───────────────────────
 if [ "$SIGN" = true ]; then
     echo "🔏 Signing all binaries inside the app..."
-    # Sign every binary individually (--deep misses --options runtime on nested binaries)
+    # 1. Individual binaries
     find "$APP_PATH" -type f \( -name "*.so" -o -name "*.dylib" -o -name "python*" -o -name "Python" \) | while read -r bin; do
         codesign --force --options runtime \
           --sign "$SIGN_ID" \
           --timestamp \
           "$bin" 2>/dev/null || true
     done
-    # Sign framework bundles
+    # 2. XPC service bundles inside Sparkle (must be signed before the framework)
+    find "$APP_PATH" -name "*.xpc" -type d | while read -r xpc; do
+        codesign --force --options runtime \
+          --sign "$SIGN_ID" \
+          --timestamp \
+          "$xpc" 2>/dev/null || true
+    done
+    # 3. Helper app bundles inside Sparkle (Autoupdate.app etc.)
+    find "$APP_PATH" -path "*/Sparkle.framework/*" -name "*.app" -type d | while read -r helper; do
+        codesign --force --options runtime \
+          --sign "$SIGN_ID" \
+          --timestamp \
+          "$helper" 2>/dev/null || true
+    done
+    # 4. Framework bundles
     find "$APP_PATH" -name "*.framework" -type d | while read -r fw; do
         codesign --force --options runtime \
           --sign "$SIGN_ID" \
           --timestamp \
           "$fw" 2>/dev/null || true
     done
-    # Sign the main executable and the app bundle last
+    # 5. Main executable and app bundle last
     codesign --force --options runtime \
       --sign "$SIGN_ID" \
       --timestamp \
@@ -122,9 +136,20 @@ if [ "$SIGN" = true ]; then
     echo "✅ DMG created: $DMG_PATH"
     echo ""
 
+    echo "📋 Generating appcast.xml..."
+    ./Sparkle/bin/generate_appcast \
+      --download-url-prefix "https://github.com/EZ-LOGGER/ez-logger/releases/download/v${APP_VERSION}/" \
+      -o appcast.xml \
+      dist/
+    echo "✅ appcast.xml updated."
+    echo ""
+
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  ✅ Signed, notarized, and ready to distribute."
-    echo "  Share: dist/EZLogger-${APP_VERSION}.dmg"
+    echo ""
+    echo "  Next steps:"
+    echo "  1. git add appcast.xml && git commit -m 'Release v${APP_VERSION}' && git push"
+    echo "  2. gh release create v${APP_VERSION} '${DMG_PATH}' --title 'EZ Logger v${APP_VERSION}'"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 else
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

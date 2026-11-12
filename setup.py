@@ -13,6 +13,8 @@ with open("renamer.py") as f:
 APP      = ["renamer.py"]
 APP_NAME = "EZ Logger"
 
+SPARKLE_FW = "Sparkle/Sparkle.framework"
+
 OPTIONS = {
     "iconfile": "icon.icns",
     "plist": {
@@ -31,7 +33,12 @@ OPTIONS = {
             "EZ Logger needs access to your footage folder.",
         "NSDownloadsFolderUsageDescription":
             "EZ Logger needs access to your footage folder.",
+        # Sparkle auto-update
+        "SUFeedURL":      "https://raw.githubusercontent.com/EZ-LOGGER/ez-logger/main/appcast.xml",
+        "SUPublicEDKey":  "JRZIA1vLikS4u1DczE/MLelmm5EJm6zyeLOXd+2EVak=",
+        "SUEnableAutomaticChecks": True,
     },
+    "frameworks": [SPARKLE_FW],
     "packages": ["rumps", "AppKit", "Foundation", "objc"],
     "includes": ["AppKit", "Foundation", "objc", "rumps"],
     "excludes": ["tkinter", "matplotlib", "numpy", "PIL"],

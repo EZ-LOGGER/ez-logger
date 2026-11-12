@@ -17,6 +17,9 @@ __pycache__/
 # py2app
 .Python
 
+# Sparkle framework — download with setup_sparkle.sh
+Sparkle/
+
 # Secrets (never commit these)
 *.p12
 *.pem
