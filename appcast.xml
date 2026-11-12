@@ -5,6 +5,15 @@
         <description>EZ Logger update feed</description>
         <language>en</language>
         <item>
+            <title>1.0.4</title>
+            <pubDate>Thu, 12 Nov 2026 14:06:15 -0500</pubDate>
+            <sparkle:version>1.0.4</sparkle:version>
+            <sparkle:shortVersionString>1.0.4</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/EZ-LOGGER/ez-logger/releases/download/v1.0.4/EZLogger-1.0.4.dmg" length="15562285" type="application/octet-stream" sparkle:edSignature="8YvH5CSRXMbJTa5J6VwHoNqd1tXfMDHwvLhFFrd2wqMZPuBrkD8al6LZHtgWNdCqsTpL+XIP5C/AQeuH4vElBw=="/>
+        </item>
+        <item>
             <title>1.0.3</title>
             <pubDate>Thu, 12 Nov 2026 12:47:38 -0500</pubDate>
             <sparkle:version>1.0.3</sparkle:version>
