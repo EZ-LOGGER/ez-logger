@@ -60,8 +60,8 @@ echo ""
 # ── Sign + Notarize (only with --sign flag) ───────────────────────
 if [ "$SIGN" = true ]; then
     echo "🔏 Signing all binaries inside the app..."
-    # 1. Individual binaries
-    find "$APP_PATH" -type f \( -name "*.so" -o -name "*.dylib" -o -name "python*" -o -name "Python" \) | while read -r bin; do
+    # 1. Individual binaries (including Sparkle's Autoupdate plain binary)
+    find "$APP_PATH" -type f \( -name "*.so" -o -name "*.dylib" -o -name "python*" -o -name "Python" -o -name "Autoupdate" \) | while read -r bin; do
         codesign --force --options runtime \
           --sign "$SIGN_ID" \
           --timestamp \
