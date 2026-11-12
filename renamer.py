@@ -5196,7 +5196,7 @@ class TagWindowV2:
                     sources.append(k)
             pop.addItemsWithTitles_(titles)
             if info.get("copy_from") in sources:
-                pop.selectItemAtIndex_(sources.index(info["copy_from"]))
+                pop.selectItemAtIndex_(sources.index(info.get("copy_from")))
 
         # Suggest a code as the name is typed, until the code is typed in by hand
         state = {"code_edited": bool(info.get("code"))}
