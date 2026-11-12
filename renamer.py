@@ -4258,6 +4258,11 @@ class TagWindowV2:
         if cancelled:   # after selecting, which resets the hint
             self._set_v2_hint("⚠  The clip you were logging was removed or moved out "
                               "of the folder, so the log was cancelled")
+            rumps.alert(
+                title="Log Cancelled",
+                message=(f"{prev_name} was deleted or moved out of the folder "
+                         "while you were logging it, so the log was cancelled.\n\n"
+                         "Nothing was renamed."))
 
     def _on_folder_changed(self):
         """FSEvents or window focus: pick up changes made outside the app."""
