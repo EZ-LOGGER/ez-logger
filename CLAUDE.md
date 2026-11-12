@@ -165,6 +165,7 @@ Flow: `handle_key` → `_handle_shortcut_key_v2` → ENTER → `_advance_step_v2
 - Transparent views still take clicks. Stacked shortcut cards must be **hidden as well as alpha 0**; `_set_cards_for_step` owns this.
 - `PillButton` handlers receive `(view, event)`. A handler with the wrong signature fails silently on click.
 - Use `PillButton`, not `NSView`, for `setClickHandler_`. Its `hitTest_` keeps labels from swallowing clicks.
+- ⌘Z is a window-wide `NSEvent` local monitor (`_install_cmd_z_monitor`), installed once and pointed at the newest `TagWindowV2`, so it works on every tab. It skips text fields (`NSText` first responder) so typing keeps its own undo. Test it by posting events with `NSApp.postEvent_atStart_` and dequeuing them; `win.sendEvent_` bypasses local monitors.
 - `SearchResultsTable` picks in its own `mouseDown_`, because the top match is already selected and a selection-change callback wouldn't fire. It refuses first responder so keys keep reaching the file list.
 - Views rebuilt later land on top of earlier siblings. `_raise_search_panel` keeps the name dropdown above the step circles.
 

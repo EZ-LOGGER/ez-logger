@@ -1113,6 +1113,40 @@ def _confirm_trash_alert(names):
     return alert.runModal() == 1000   # NSAlertFirstButtonReturn
 
 
+_cmd_z_target  = None   # the open TagWindowV2; ⌘Z in its window runs the app's Undo
+_cmd_z_monitor = None   # installed once, so reopening the window never stacks monitors
+
+
+def _install_cmd_z_monitor(tag_window):
+    """Make ⌘Z undo the last rename or trash from any tab, not just the Log Mode list.
+    Text fields keep ⌘Z for undoing typing."""
+    global _cmd_z_target, _cmd_z_monitor
+    _cmd_z_target = tag_window
+    if _cmd_z_monitor is not None:
+        return
+    from AppKit import NSEvent, NSText
+
+    def handler(event):
+        try:
+            target = _cmd_z_target
+            flags  = event.modifierFlags()
+            if (target is None or event.window() is None
+                    or event.window() != target.win
+                    or not (flags & 0x100000)              # ⌘
+                    or (flags & (0x20000 | 0x80000 | 0x40000))   # ⇧ ⌥ ⌃
+                    or (event.charactersIgnoringModifiers() or "").lower() != "z"):
+                return event
+            if isinstance(target.win.firstResponder(), NSText):
+                return event                               # editing text: its own undo
+            target.handle_cmd_z()
+            return None
+        except Exception:
+            return event
+
+    _cmd_z_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+        1 << 10, handler)   # NSEventMaskKeyDown
+
+
 def _style_reject_cell(owner, cell, row):
     """Strike through and dim a clip marked as a reject in a file list."""
     if not owner or not (0 <= row < len(owner._files)):
@@ -1436,7 +1470,8 @@ def make_objc_classes():
         def keyDown_(self, event):
             chars = event.characters() or ""
             # ⌘Z → undo (NSCommandKeyMask = 0x100000)
-            if chars == "z" and (event.modifierFlags() & 0x100000):
+            if (chars == "z" and (event.modifierFlags() & 0x100000)
+                    and not (event.modifierFlags() & 0x20000)):   # plain ⌘Z, not ⇧⌘Z
                 if self.owner and hasattr(self.owner, "handle_cmd_z"):
                     self.owner.handle_cmd_z()
                 return
@@ -2278,6 +2313,7 @@ class TagWindowV2:
         )
         self.win.setTitle_(f"EZ Logger {APP_VERSION}")
         self.win.setReleasedWhenClosed_(False)
+        _install_cmd_z_monitor(self)
         self.win.setTitlebarAppearsTransparent_(True)
         try:
             self.win.setAppearance_(
