@@ -1156,3 +1156,14 @@ def test_step_circle_scale_limited_by_width_and_steps():
     assert renamer.step_circle_scale(390, tall, 6) < renamer.step_circle_scale(390, tall, 3)
     assert renamer.step_circle_scale(100, 100, 8) == 0.85     # floor
     assert renamer.step_circle_scale(390, 220, 0) == 1.0      # no steps doesn't divide by zero
+
+
+# ── Update check ─────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("latest,current,newer", [
+    ("1.0.7", "1.0.6", True), ("v1.0.7", "1.0.6", True), ("1.0.6", "1.0.6", False),
+    ("1.0.10", "1.0.9", True), ("1.0.5", "1.0.6", False), ("1.1", "1.0.9", True),
+    ("garbage", "1.0.6", False),
+])
+def test_is_newer_version(latest, current, newer):
+    assert renamer.is_newer_version(latest, current) is newer

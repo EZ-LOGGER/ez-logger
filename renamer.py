@@ -90,6 +90,11 @@ def _init_sparkle():
         from Foundation import NSBundle
         # In a built app the framework is in Contents/Frameworks/; in dev it's in Sparkle/
         main_bundle = NSBundle.mainBundle()
+        # Sparkle reads its feed from the app's Info.plist. Running from source the
+        # main bundle is Python.app, which has none, so Sparkle can't check at all;
+        # leave it off and let the GitHub check below handle updates.
+        if not main_bundle.objectForInfoDictionaryKey_("SUFeedURL"):
+            return
         candidates = [
             main_bundle.bundlePath() + "/Contents/Frameworks/Sparkle.framework",
             os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -109,22 +114,34 @@ def _init_sparkle():
     except Exception:
         pass
 
+def _version_tuple(v):
+    try:
+        return tuple(int(x) for x in str(v).lstrip("v").split("."))
+    except Exception:
+        return (0,)
+
+
+def is_newer_version(latest, current):
+    """'1.0.10' > '1.0.9' compares numerically, not as text."""
+    return _version_tuple(latest) > _version_tuple(current)
+
+
+def _fetch_latest_release():
+    """Return (version, release page url) of the latest GitHub release. Raises on failure."""
+    req = urllib.request.Request(UPDATE_CHECK_URL, headers={"User-Agent": f"EZLogger/{APP_VERSION}"})
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        data = json.loads(resp.read().decode())
+    tag = data.get("tag_name", "").lstrip("v")
+    if not tag:
+        raise ValueError("no release tag")
+    return tag, data.get("html_url", "")
+
+
 def _check_for_updates_bg(on_update_available):
     """Fetch latest GitHub release version in background. Calls on_update_available(version, url) if newer."""
     try:
-        req = urllib.request.Request(UPDATE_CHECK_URL, headers={"User-Agent": f"EZLogger/{APP_VERSION}"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode())
-        tag = data.get("tag_name", "").lstrip("v")
-        html_url = data.get("html_url", "")
-        if not tag:
-            return
-        def _parse(v):
-            try:
-                return tuple(int(x) for x in v.split("."))
-            except Exception:
-                return (0,)
-        if _parse(tag) > _parse(APP_VERSION):
+        tag, html_url = _fetch_latest_release()
+        if is_newer_version(tag, APP_VERSION):
             on_update_available(tag, html_url)
     except Exception:
         pass
@@ -11016,9 +11033,36 @@ class BasketballRenamerApp(rumps.App):
     def _check_for_updates_menu(self, _):
         if _sparkle_controller is not None:
             _sparkle_controller.checkForUpdates_(None)
+            return
+        # No Sparkle (running from source): ask GitHub, then answer on the main thread
+        make_objc_classes()   # MainCaller, in case no window has been built yet
+        def work():
+            try:
+                result = _fetch_latest_release()
+            except Exception as e:
+                result = e
+            caller = MainCaller.alloc().init()
+            caller._cb = lambda: self._show_update_result(result)
+            caller.performSelectorOnMainThread_withObject_waitUntilDone_("fire:", None, False)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_update_result(self, result):
+        releases = "https://github.com/EZ-LOGGER/ez-logger/releases"
+        if isinstance(result, Exception):
+            rumps.alert(title="Couldn't Check for Updates",
+                        message=("EZ Logger couldn't reach GitHub. Check your internet "
+                                 f"connection and try again.\n\nYou have version {APP_VERSION}."))
+            return
+        version, url = result
+        if is_newer_version(version, APP_VERSION):
+            if rumps.alert(title="Update Available",
+                           message=(f"Version {version} is available. You have {APP_VERSION}."),
+                           ok="Open Download Page", cancel="Later") == 1:
+                import webbrowser
+                webbrowser.open(url or releases)
         else:
-            import webbrowser
-            webbrowser.open("https://github.com/EZ-LOGGER/ez-logger/releases")
+            rumps.alert(title="You're Up to Date",
+                        message=f"EZ Logger {APP_VERSION} is the newest version.")
 
     def _migrate_shortcuts(self, data):
         """Migrate old flat {bank: [...]} format to nested {sport_key: {bank: [...]}}."""
