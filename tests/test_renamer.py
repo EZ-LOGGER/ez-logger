@@ -1040,3 +1040,119 @@ def test_clip_media_info_never_raises(tmp_path):
     f.write_bytes(b"not a movie")
     info = renamer.clip_media_info(f)    # AVFoundation is stubbed here
     assert info["size"] == 11 and info["duration"] is None and info["recorded"] is not None
+
+
+# ── Sorting the file list ────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("sort,expected", [
+    ("name_asc", ("name", True)), ("name_desc", ("name", False)),
+    ("duration_desc", ("duration", False)), ("recorded_asc", ("recorded", True)),
+    ("date_created", ("date_created", True)), ("bogus_asc", ("name", True)),
+    (None, ("name", True)), ("", ("name", True)),
+])
+def test_parse_sort_order(sort, expected):
+    assert renamer.parse_sort_order(sort) == expected
+
+
+def test_next_sort_order():
+    assert renamer.next_sort_order("name_asc", "name") == "name_desc"
+    assert renamer.next_sort_order("name_desc", "name") == "name_asc"
+    assert renamer.next_sort_order("name_desc", "duration") == "duration_asc"
+    assert renamer.next_sort_order("duration_asc", "duration") == "duration_desc"
+    assert renamer.next_sort_order("date_created", "name") == "name_asc"
+
+
+def test_sort_order_label():
+    assert renamer.sort_order_label("name_desc") == "Name Z → A"
+    assert renamer.sort_order_label("timecode_asc") == "Timecode ↑"
+    assert renamer.sort_order_label("fps_desc") == "FPS ↓"
+
+
+class _St:
+    def __init__(self, size=0, mtime=0.0, birth=0.0):
+        self.st_size, self.st_mtime, self.st_birthtime = size, mtime, birth
+
+
+def _entries(*specs):
+    return [(Path(n), _St(**kw)) for n, kw in specs]
+
+
+def test_sort_file_entries_by_name_and_dates():
+    e = _entries(("b.mov", {"mtime": 1, "birth": 3}), ("a.mov", {"mtime": 2, "birth": 2}),
+                 ("c.mov", {"mtime": 3, "birth": 1}))
+    names = lambda es: [p.name for p, _ in es]
+    assert names(renamer.sort_file_entries(e, "name_asc")) == ["a.mov", "b.mov", "c.mov"]
+    assert names(renamer.sort_file_entries(e, "name_desc")) == ["c.mov", "b.mov", "a.mov"]
+    assert names(renamer.sort_file_entries(e, "date_created")) == ["c.mov", "a.mov", "b.mov"]
+    assert names(renamer.sort_file_entries(e, "date_modified")) == ["b.mov", "a.mov", "c.mov"]
+
+
+def test_sort_file_entries_by_info_unknown_last():
+    e = _entries(("a.mov", {}), ("b.mov", {}), ("c.mov", {}), ("d.mov", {}))
+    info = {"a.mov": {"duration": 30.0}, "b.mov": None, "c.mov": {"duration": 5.0},
+            "d.mov": {"duration": 30.0}}
+    lookup = lambda p, st: info[p.name]
+    names = lambda es: [p.name for p, _ in es]
+    assert names(renamer.sort_file_entries(e, "duration_asc", lookup)) == ["c.mov", "a.mov", "d.mov", "b.mov"]
+    # descending keeps the unknown clip last and ties in name order
+    assert names(renamer.sort_file_entries(e, "duration_desc", lookup)) == ["a.mov", "d.mov", "c.mov", "b.mov"]
+
+
+def test_sort_file_entries_by_size_and_timecode():
+    e = _entries(("a.mov", {"size": 30}), ("b.mov", {"size": 10}), ("c.mov", {"size": 20}))
+    names = lambda es: [p.name for p, _ in es]
+    assert names(renamer.sort_file_entries(e, "size_desc")) == ["a.mov", "c.mov", "b.mov"]
+    tc = {"a.mov": {"tc_frame": 90000, "tc_quanta": 25},     # 01:00:00:00
+          "b.mov": {"tc_frame": 1800, "tc_quanta": 30},      # 00:01:00
+          "c.mov": {"tc_frame": None}}
+    assert names(renamer.sort_file_entries(e, "timecode_asc", lambda p, st: tc[p.name])) == \
+        ["b.mov", "a.mov", "c.mov"]
+
+
+def test_file_list_densities_shape():
+    assert set(renamer.FILE_LIST_DENSITIES) == {"compact", "normal", "comfortable"}
+    heights = [renamer.FILE_LIST_DENSITIES[k][0] for k in ("compact", "normal", "comfortable")]
+    assert heights == sorted(heights) and renamer.FILE_LIST_DENSITIES["normal"][0] == 26.0
+
+
+# ── Fitting the file list beside the Log Mode cards ──────────────────────────
+
+COLS = [("duration", 62), ("timecode", 90), ("fps", 52)]
+
+
+def test_fit_file_list_keeps_preferred_when_it_fits():
+    assert renamer.fit_file_list(450, 600, COLS) == (450, ["duration", "timecode", "fps"])
+    assert renamer.fit_file_list(450, 450, COLS) == (450, ["duration", "timecode", "fps"])
+
+
+def test_fit_file_list_drops_columns_from_the_right_first():
+    # 170 name + 24 chrome + (62+3) + (90+3) + (52+3) = 407
+    assert renamer.fit_file_list(450, 407, COLS) == (407, ["duration", "timecode", "fps"])
+    assert renamer.fit_file_list(450, 406, COLS) == (406, ["duration", "timecode"])
+    assert renamer.fit_file_list(450, 300, COLS) == (300, ["duration"])
+    assert renamer.fit_file_list(450, 258, COLS) == (258, [])
+
+
+def test_fit_file_list_never_below_minimum():
+    w, shown = renamer.fit_file_list(450, 90, COLS)
+    assert w == renamer.FILE_LIST_MIN_W and shown == []
+    assert renamer.fit_file_list(260, 100, []) == (renamer.FILE_LIST_MIN_W, [])
+
+
+# ── Step circle scaling ──────────────────────────────────────────────────────
+
+def test_step_circle_scale_default_size_unchanged():
+    assert renamer.step_circle_scale(390, 220, 3) == 1.0
+
+
+def test_step_circle_scale_grows_with_the_card_and_is_capped():
+    assert renamer.step_circle_scale(390, 300, 3) > 1.0
+    assert renamer.step_circle_scale(2000, 2000, 3) == 1.75
+
+
+def test_step_circle_scale_limited_by_width_and_steps():
+    tall = 500
+    assert renamer.step_circle_scale(300, tall, 3) < renamer.step_circle_scale(390, tall, 3)
+    assert renamer.step_circle_scale(390, tall, 6) < renamer.step_circle_scale(390, tall, 3)
+    assert renamer.step_circle_scale(100, 100, 8) == 0.85     # floor
+    assert renamer.step_circle_scale(390, 220, 0) == 1.0      # no steps doesn't divide by zero

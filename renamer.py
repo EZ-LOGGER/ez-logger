@@ -156,6 +156,7 @@ DEFAULT_SETTINGS = {
     # Display
     "show_jersey_numbers":     True,
     "pill_density":            "auto",
+    "file_list_density":       "normal",   # row height of the clip lists: compact / normal / comfortable
     "file_list_width":         260,
     "file_list_columns":       {"visible": [], "widths": {}},   # info columns in the Log Mode file list
     # Stats
@@ -875,6 +876,127 @@ def toggle_info_column(prefs, col_id):
     vis.symmetric_difference_update({col_id})
     prefs["visible"] = [c for c in FILE_INFO_IDS if c in vis]
     return prefs
+
+
+FILE_LIST_DENSITIES = {
+    # setting value: (row height, name font size, info font size)
+    "compact":     (20.0, 12.0, 11.0),
+    "normal":      (26.0, 13.0, 11.5),
+    "comfortable": (34.0, 14.0, 12.5),
+}
+
+SORT_LABELS = {"name_asc": "Name A → Z", "name_desc": "Name Z → A",
+               "date_created": "Date Created", "date_modified": "Date Modified"}
+
+
+def parse_sort_order(sort):
+    """'name_asc' → ('name', True); 'duration_desc' → ('duration', False).
+    The older 'date_created' / 'date_modified' values come back as themselves, ascending.
+    Anything unknown falls back to ('name', True)."""
+    if sort in ("date_created", "date_modified"):
+        return sort, True
+    if isinstance(sort, str) and "_" in sort:
+        col, _, direction = sort.rpartition("_")
+        if direction in ("asc", "desc") and (col == "name" or col in FILE_INFO_IDS):
+            return col, direction == "asc"
+    return "name", True
+
+
+def next_sort_order(current, clicked_col):
+    """Header click: the same column flips direction, a new column starts ascending."""
+    col, asc = parse_sort_order(current)
+    if col == clicked_col:
+        return f"{clicked_col}_{'desc' if asc else 'asc'}"
+    return f"{clicked_col}_asc"
+
+
+def sort_order_label(sort):
+    if sort in SORT_LABELS:
+        return SORT_LABELS[sort]
+    col, asc = parse_sort_order(sort)
+    title = next((t for cid, t, _w, _r in FILE_INFO_COLUMNS if cid == col), "Name")
+    return f"{title} {'↑' if asc else '↓'}"
+
+
+def _info_sort_value(col, info, st):
+    """Comparable value for one info column, or None when unknown."""
+    if col == "size":
+        return st.st_size if st is not None else None
+    if not info:
+        return None
+    if col == "duration":
+        return info.get("duration")
+    if col == "timecode":
+        f, q = info.get("tc_frame"), info.get("tc_quanta")
+        return f / float(q) if f is not None and q else None
+    if col == "fps":
+        return info.get("fps")
+    if col == "resolution":
+        w, h = info.get("width"), info.get("height")
+        return w * h if w and h else None
+    if col == "codec":
+        return file_info_value(info, "codec").lower() if info.get("codec") else None
+    if col == "audio":
+        return info.get("audio_channels") or (0 if info.get("has_audio") is False else None)
+    if col == "recorded":
+        dt = info.get("recorded")
+        return dt.timestamp() if dt else None
+    return None
+
+
+def sort_file_entries(entries, sort, info_for=lambda path, st: None):
+    """Sort [(Path, stat)] for the file list. info_for(path, st) returns cached clip
+    info or None. Clips whose value is unknown go last in either direction;
+    ties fall back to the name."""
+    col, asc = parse_sort_order(sort)
+    if sort == "date_created":
+        return sorted(entries, key=lambda e: (getattr(e[1], "st_birthtime", e[1].st_mtime), e[0].name))
+    if sort == "date_modified":
+        return sorted(entries, key=lambda e: (e[1].st_mtime, e[0].name))
+    if col == "name":
+        return sorted(entries, key=lambda e: e[0].name, reverse=not asc)
+    known, unknown = [], []
+    for e in entries:
+        v = _info_sort_value(col, info_for(e[0], e[1]), e[1])
+        (unknown if v is None else known).append((v, e))
+    known.sort(key=lambda ve: ve[1][0].name)                 # stable tie-break by name
+    known.sort(key=lambda ve: ve[0], reverse=not asc)
+    unknown.sort(key=lambda ve: ve[1][0].name)
+    return [e for _v, e in known] + [e for _v, e in unknown]
+
+
+FILE_LIST_MIN_W   = 160    # narrowest the Log Mode file list gets
+FILE_LIST_NAME_MIN = 170   # keep at least this much for clip names before dropping info columns
+CARDS_MIN_TOTAL   = 440    # Log Mode cards' minimum width (400) plus their side margins
+
+
+def fit_file_list(preferred_w, max_w, columns, spacing=3.0,
+                  min_w=FILE_LIST_MIN_W, name_min=FILE_LIST_NAME_MIN, chrome=24.0):
+    """Fit the Log Mode file list into the room the window leaves beside the cards.
+    columns is [(col_id, width)] of the info columns the user turned on, left to right.
+    Returns (panel width, [col_ids to show]). While the preferred width fits, nothing
+    changes. Otherwise the panel narrows to max_w (never below min_w), and info
+    columns drop from the right until the clip names keep name_min."""
+    ids = [c for c, _w in columns]
+    if preferred_w <= max_w:
+        return preferred_w, ids
+    width = max(min_w, max_w)
+    shown = list(columns)
+    while shown and name_min + chrome + sum(w + spacing for _c, w in shown) > width:
+        shown.pop()
+    return width, [c for c, _w in shown]
+
+
+def step_circle_scale(left_w, card_h, n_steps):
+    """Scale for the Log Mode step circles (1.0 = 32 px circles, the original size).
+    Limited by the height between the preview line and the hint, and by the width
+    the row of circles needs, so circles and labels grow and shrink together."""
+    band    = max(0.0, card_h - 100.0)          # between hint (32) and preview text (card_h-68)
+    s_v     = band / 120.0                      # 1.0 at the default 220 px card
+    n       = max(1, int(n_steps))
+    # circles + gaps + the label overhang (up to 30 px) past the first and last circle
+    s_h     = max(0.0, left_w - 40.0) / (n * 32.0 + (n - 1) * 60.0 + 60.0)
+    return round(max(0.85, min(1.75, s_v, s_h)), 3)
 
 
 def media_info_key(path):
@@ -1936,11 +2058,12 @@ hover_press_up = None
 hover_dip = None
 WindowDelegate       = None
 FilePanelResizer     = None
+VCenterTextCell      = None
 NowCardResizer       = None
 CardHeightResizer    = None
 
 def make_objc_classes():
-    global _classes_made, KeyTableView, NavItemView, ActionButton, PillButton, MenuTarget, MainCaller, FileListDelegate, NamingClipsDelegate, NamingClipsTable, QLDataSource, SearchResultsDelegate, SearchResultsTable, HoverButton, add_hover_highlight, clear_hover_highlight, hover_press_down, hover_press_up, hover_dip, WindowDelegate, FilePanelResizer, NowCardResizer, CardHeightResizer, TutorialOverlay, EmojiField
+    global _classes_made, KeyTableView, NavItemView, ActionButton, PillButton, MenuTarget, MainCaller, FileListDelegate, NamingClipsDelegate, NamingClipsTable, QLDataSource, SearchResultsDelegate, SearchResultsTable, HoverButton, add_hover_highlight, clear_hover_highlight, hover_press_down, hover_press_up, hover_dip, WindowDelegate, FilePanelResizer, NowCardResizer, CardHeightResizer, TutorialOverlay, EmojiField, VCenterTextCell
     if _classes_made:
         return
     _classes_made = True
@@ -2345,6 +2468,20 @@ def make_objc_classes():
 
     EmojiField = _EmojiField
 
+    from AppKit import NSTextFieldCell
+
+    class _VCenterTextCell(NSTextFieldCell):
+        """Table text cell that draws its text centred in the row, whatever the row height."""
+        def drawInteriorWithFrame_inView_(self, frame, view):
+            h = self.cellSizeForBounds_(frame).height
+            if 0 < h < frame.size.height:
+                frame = NSMakeRect(frame.origin.x,
+                                   frame.origin.y + (frame.size.height - h) / 2.0,
+                                   frame.size.width, h)
+            objc.super(_VCenterTextCell, self).drawInteriorWithFrame_inView_(frame, view)
+
+    VCenterTextCell = _VCenterTextCell
+
     class _FileListDelegate(NSObject):
         owner = None
 
@@ -2368,6 +2505,10 @@ def make_objc_classes():
                 cell.setLineBreakMode_(4)  # truncate tail
                 _style_reject_cell(self.owner, cell, row,
                                    text=self.owner._file_info_text(row, cid) if self.owner else "")
+
+        def tableView_didClickTableColumn_(self, tv, col):
+            if self.owner and col is not None:
+                self.owner._on_file_header_clicked(col.identifier())
 
         def tableViewColumnDidResize_(self, notif):
             col = notif.userInfo().get("NSTableColumn") if notif.userInfo() else None
@@ -2565,16 +2706,19 @@ def make_objc_classes():
 
         def mouseDown_(self, event):
             self._drag_start_x = float(event.locationInWindow().x)
-            self._drag_start_w = float(self.owner._file_list_w)
+            # Start from the width on screen, which is narrower than the saved one
+            # while the window is too small for it
+            panel = getattr(self.owner, "_file_list_panel", None)
+            self._drag_start_w = float(panel.frame().size.width if panel is not None
+                                       else self.owner._file_list_w)
 
         def mouseDragged_(self, event):
             if self.owner is None:
                 return
             dx  = event.locationInWindow().x - self._drag_start_x
             W   = self.owner.win.frame().size.width
-            sidebar_w = self.owner.SIDEBAR_W if self.owner._sidebar_visible else 0
-            max_w = max(160, W - sidebar_w - 440)   # always leave ≥440px for cards
-            new_w = max(160, min(max_w, self._drag_start_w + dx))
+            max_w = max(FILE_LIST_MIN_W, self.owner._file_list_max_w(W))   # cards keep their room
+            new_w = max(FILE_LIST_MIN_W, min(max_w, self._drag_start_w + dx))
             self.owner._file_list_w = new_w
             H = self.owner.win.contentView().frame().size.height
             self.owner._reposition_layout(W, H)
@@ -2941,7 +3085,12 @@ class TagWindowV2:
         LEFT_W   = getattr(self, "_step_circles_left_w", 420)
         card_h   = getattr(self, "_step_circles_card_h",
                            self._now_card_h if hasattr(self, "_now_card_h") else 220)
-        circle_d  = 32
+        n = len(self._steps)
+        # One scale for circle, number, label and spacing, so they keep their proportions
+        sc        = step_circle_scale(LEFT_W, card_h, n)
+        circle_d  = round(32 * sc)
+        lbl_drop  = 18 * sc            # label sits this far below the circle's bottom
+        lbl_h     = round(14 * sc)
         # Center circles vertically between the preview text (card_h-68) and hint (32)
         mid_y     = (32 + (card_h - 68)) / 2
         circles_y = int(mid_y - circle_d / 2)
@@ -2958,8 +3107,15 @@ class TagWindowV2:
         self._now_step_labels  = []
         self._now_step_lines   = []
 
-        n   = len(self._steps)
-        gap = min(70, max(20, int((LEFT_W - 40 - circle_d * n) / max(1, n - 1))))
+        gap = min(70 * sc, max(20 * sc, (LEFT_W - 40 - circle_d * n) / max(1, n - 1)))
+        gap = int(gap)
+        # Labels are wider than circles; tighten the gap until the first and last
+        # labels stay inside the left column (not over the divider)
+        def _row_span(g):
+            overhang = max(0.0, min(60 * sc, g - 10 * sc)) / 2
+            return circle_d * n + g * (n - 1) + 2 * overhang
+        while gap > int(20 * sc) and _row_span(gap) > LEFT_W - 24:
+            gap -= 1
         row_w = circle_d * n + gap * (n - 1)
         row_x = (LEFT_W - row_w) / 2
 
@@ -2978,13 +3134,13 @@ class TagWindowV2:
             c = PillButton.alloc().initWithFrame_(
                 NSMakeRect(x, circles_y, circle_d, circle_d))
             c.layer().setCornerRadius_(circle_d / 2)
-            c.layer().setBorderWidth_(1.5)
+            c.layer().setBorderWidth_(max(1.0, 1.5 * sc))
             c.setClickHandler_(
                 lambda v, e, idx=i: self._set_step_state(active=idx))
             card.addSubview_(c)
 
             num_lbl = NSTextField.labelWithString_(str(i + 1))
-            num_lbl.setFont_(NSFont.boldSystemFontOfSize_(13))
+            num_lbl.setFont_(NSFont.boldSystemFontOfSize_(13 * sc))
             num_lbl.sizeToFit()
             nf = num_lbl.frame()
             num_lbl.setFrame_(NSMakeRect(
@@ -2993,20 +3149,22 @@ class TagWindowV2:
                 nf.size.width, nf.size.height))
             c.addSubview_(num_lbl)
 
-            # Truncate label to fit — wider gap → more room
-            max_chars = max(4, gap // 7)
+            # Truncate label to fit — wider gap → more room (character width grows with scale)
+            max_chars = max(4, int(gap // (7 * sc)))
             display   = label[:max_chars] if len(label) > max_chars else label
             step_lbl  = NSTextField.labelWithString_(display)
-            step_lbl.setFont_(NSFont.systemFontOfSize_(10))
+            step_lbl.setFont_(NSFont.systemFontOfSize_(10 * sc))
             step_lbl.setAlignment_(2)
-            lbl_w = circle_d + min(60, gap - 10)
+            lbl_w = circle_d + min(60 * sc, gap - 10 * sc)
             step_lbl.setFrame_(NSMakeRect(
-                x - (lbl_w - circle_d) / 2, circles_y - 18, lbl_w, 14))
+                x - (lbl_w - circle_d) / 2, circles_y - lbl_drop, lbl_w, lbl_h))
             card.addSubview_(step_lbl)
 
             self._now_step_circles.append((c, num_lbl))
             self._now_step_labels.append(step_lbl)
 
+        # New circles start unstyled; give them the current step's colors again
+        self._paint_step_circles(*getattr(self, "_step_state", (-1, ())))
         self._raise_search_panel()
 
     def _build_window(self):
@@ -3225,13 +3383,17 @@ class TagWindowV2:
         W = self.win.frame().size.width
         H = self.win.contentView().frame().size.height
 
-        # Sidebar show/hide
-        if self._sidebar_visible and W < self.SIDEBAR_HIDE_W:
+        # Sidebar show/hide. In Log Mode it also hides when the file list couldn't
+        # keep its minimum width beside the cards.
+        tag_need = (self.SIDEBAR_W + 20 + FILE_LIST_MIN_W + CARDS_MIN_TOTAL
+                    if self.current_section == "tag" and self._file_list_visible else 0)
+        if self._sidebar_visible and (W < self.SIDEBAR_HIDE_W or W < tag_need):
             self._sidebar_visible = False
             self._sidebar.setHidden_(True)
             if hasattr(self, "_sidebar_toggle_btn"):
                 self._sidebar_toggle_btn.setHidden_(False)
-        elif not self._sidebar_visible and W >= self.SIDEBAR_SHOW_W:
+        elif (not self._sidebar_visible and W >= self.SIDEBAR_SHOW_W
+                and W >= tag_need + 40):
             self._sidebar_visible = True
             self._sidebar.setHidden_(False)
             if hasattr(self, "_sidebar_toggle_btn"):
@@ -3313,21 +3475,23 @@ class TagWindowV2:
                 v.setFrame_(NSMakeRect(cx, f.origin.y, cw, f.size.height))
                 v.setAutoresizingMask_(2 | 8 | 32)
 
-        # File-list panel — shift x and update width from the user-dragged value
+        # File-list panel — the user's width when it fits beside the cards; otherwise
+        # info columns drop first, then the panel narrows (_fit_file_list)
+        fl_eff_w = self._fit_file_list(W)
         if hasattr(self, "_file_list_panel"):
             f = self._file_list_panel.frame()
             self._file_list_panel.setFrame_(
-                NSMakeRect(cx + 12, f.origin.y, self._file_list_w, f.size.height))
+                NSMakeRect(cx + 12, f.origin.y, fl_eff_w, f.size.height))
 
         # Drag handle — sits on the right edge of the file-list panel
         if hasattr(self, "_fl_resize_handle"):
             f = self._fl_resize_handle.frame()
-            handle_x = cx + 12 + self._file_list_w - 3
+            handle_x = cx + 12 + fl_eff_w - 3
             self._fl_resize_handle.setFrame_(
                 NSMakeRect(handle_x, f.origin.y, f.size.width, f.size.height))
 
         # Re-center now-tagging card and shortcut cards
-        fl_w = self._file_list_w if self._file_list_visible else 0
+        fl_w = fl_eff_w if self._file_list_visible else 0
         cards_x = cx + fl_w + 20
         available_w = W - cards_x
         # Fill available width (no hard cap) — internals reflow via _reposition_now_card_internals
@@ -3380,6 +3544,28 @@ class TagWindowV2:
 
         if hasattr(self, "win"):
             self.win.contentView().setNeedsDisplay_(True)
+
+    def _file_list_max_w(self, W):
+        """Widest the file list can be with the Log Mode cards still at full minimum width."""
+        cx = self.SIDEBAR_W if self._sidebar_visible else 0
+        return W - cx - 20 - CARDS_MIN_TOTAL
+
+    def _fit_file_list(self, W):
+        """Return the file list's width for this window width, dropping info columns
+        that no longer fit. Their on/off choice and widths in Settings stay as they are,
+        so they come back when the window widens again."""
+        prefs = self._column_prefs() if hasattr(self, "_settings") else {"visible": [], "widths": {}}
+        defaults = {cid: w for cid, _t, w, _r in FILE_INFO_COLUMNS}
+        cols = [(c, prefs["widths"].get(c, defaults[c])) for c in prefs["visible"]]
+        spacing = 3.0
+        if hasattr(self, "_file_list_table"):
+            spacing = self._file_list_table.intercellSpacing().width
+        width, shown = fit_file_list(self._file_list_w, self._file_list_max_w(W), cols, spacing)
+        self._fit_shown_cols = shown
+        if (hasattr(self, "_file_list_table")
+                and shown != getattr(self, "_applied_shown_cols", None)):
+            self._apply_info_columns()
+        return width
 
     def _toggle_sidebar(self):
         W = self.win.frame().size.width
@@ -3796,7 +3982,7 @@ class TagWindowV2:
         self._step_circles_card_h = card_h
         old_w = getattr(self, "_last_step_circles_w", 0)
         old_h = getattr(self, "_last_step_circles_h", 0)
-        if abs(old_w - left_w) > 6 or abs(old_h - card_h) > 6:
+        if abs(old_w - left_w) > 3 or abs(old_h - card_h) > 3:
             self._last_step_circles_w = left_w
             self._last_step_circles_h = card_h
             self._build_step_circles()
@@ -4730,6 +4916,7 @@ class TagWindowV2:
         col.setEditable_(False)
         col.setResizingMask_(1 | 2)   # autoresizing + user resizing
         col.headerCell().setStringValue_("Name")
+        col.setDataCell_(VCenterTextCell.alloc().initTextCell_(""))
         table.addTableColumn_(col)
 
         scroll.setDocumentView_(table)
@@ -4798,13 +4985,16 @@ class TagWindowV2:
         from AppKit import NSTableColumn, NSFont, NSColor
         table = self._file_list_table
         prefs = self._column_prefs()
+        fitted = getattr(self, "_fit_shown_cols", None)
+        shown  = [c for c in prefs["visible"] if fitted is None or c in fitted]
+        self._applied_shown_cols = shown
         self._applying_columns = True
         try:
             for c in list(table.tableColumns()):
                 if c.identifier() != "name":
                     table.removeTableColumn_(c)
             titles = {cid: (title, w, right) for cid, title, w, right in FILE_INFO_COLUMNS}
-            for cid in prefs["visible"]:
+            for cid in shown:
                 title, default_w, right = titles[cid]
                 col = NSTableColumn.alloc().initWithIdentifier_(cid)
                 col.setEditable_(False)
@@ -4813,14 +5003,15 @@ class TagWindowV2:
                 col.setResizingMask_(2)   # user resizing only; the name column absorbs the rest
                 col.setWidth_(prefs["widths"].get(cid, default_w))
                 col.headerCell().setStringValue_(title)
-                cell = col.dataCell()
-                cell.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(11.5, 0.0))
+                cell = VCenterTextCell.alloc().initTextCell_("")
+                col.setDataCell_(cell)
+                cell.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(self._density()[2], 0.0))
                 cell.setTextColor_(NSColor.secondaryLabelColor())
                 if right:
                     cell.setAlignment_(1)              # NSTextAlignmentRight
                     col.headerCell().setAlignment_(1)
                 table.addTableColumn_(col)
-            want_header = bool(prefs["visible"])
+            want_header = bool(shown)
             if want_header and table.headerView() is None:
                 table.setHeaderView_(self._file_list_header)
                 self._file_list_header.setMenu_(self._build_columns_menu())
@@ -4831,10 +5022,78 @@ class TagWindowV2:
             if hasattr(self, "_file_list_scroll"):
                 self._file_list_scroll.tile()
             table.sizeToFit()
+            self._apply_file_list_density(reload=False)
+            self._update_sort_indicators()
             table.reloadData()
         finally:
             self._applying_columns = False
         self._queue_media_info()
+
+    # ── Sorting and row density ───────────────────────────────────────────────
+
+    def _density(self):
+        return FILE_LIST_DENSITIES.get(self._settings.get("file_list_density", "normal"),
+                                       FILE_LIST_DENSITIES["normal"])
+
+    def _apply_file_list_density(self, reload=True):
+        """Row height and fonts for both clip lists (Log Mode and the Naming tab)."""
+        from AppKit import NSFont
+        row_h, name_pt, info_pt = self._density()
+        for attr in ("_file_list_table", "_naming_clips_table"):
+            table = getattr(self, attr, None)
+            if table is None:
+                continue
+            table.setRowHeight_(row_h)
+            for c in table.tableColumns():
+                cell = c.dataCell()
+                if c.identifier() == "name":
+                    cell.setFont_(NSFont.systemFontOfSize_(name_pt))
+                else:
+                    cell.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(info_pt, 0.0))
+            if reload:
+                table.reloadData()
+
+    def _update_sort_indicators(self):
+        """Arrow on the sorted column's header; none for the date sorts from Settings."""
+        if not hasattr(self, "_file_list_table"):
+            return
+        from AppKit import NSImage
+        table = self._file_list_table
+        sort  = self._settings.get("file_sort_order", "name_asc")
+        col_id, asc = parse_sort_order(sort)
+        if sort in ("date_created", "date_modified"):
+            col_id = None
+        sorted_col = None
+        for c in table.tableColumns():
+            if c.identifier() == col_id:
+                sorted_col = c
+                img = NSImage.imageNamed_(
+                    "NSAscendingSortIndicator" if asc else "NSDescendingSortIndicator")
+                table.setIndicatorImage_inTableColumn_(img, c)
+            else:
+                table.setIndicatorImage_inTableColumn_(None, c)
+        table.setHighlightedTableColumn_(sorted_col)
+
+    def _set_sort_order(self, sort):
+        self._settings["file_sort_order"] = sort
+        _save_setting("file_sort_order", sort)
+        btn = getattr(self, "_settings_btns", {}).get("file_sort_order")
+        if isinstance(btn, tuple) and len(btn) == 2 and hasattr(btn[1], "setStringValue_"):
+            btn[1].setStringValue_(f"{sort_order_label(sort)}  ▾")
+        self._update_sort_indicators()
+        self._refresh_files()
+        if 0 <= self._selected_file_idx and hasattr(self, "_file_list_table"):
+            self._file_list_table.scrollRowToVisible_(self._selected_file_idx)
+
+    def _on_file_header_clicked(self, col_id):
+        self._set_sort_order(
+            next_sort_order(self._settings.get("file_sort_order", "name_asc"), col_id))
+
+    def _on_media_pass_done(self):
+        """Clip info finished loading; re-sort if the list is sorted by an info column."""
+        col_id, _asc = parse_sort_order(self._settings.get("file_sort_order", "name_asc"))
+        if col_id in FILE_INFO_IDS and col_id != "size":
+            self._refresh_files()
 
     def _build_columns_menu(self):
         from AppKit import NSMenu, NSMenuItem
@@ -4877,6 +5136,9 @@ class TagWindowV2:
         self._settings["file_list_columns"] = prefs
         _save_setting("file_list_columns", prefs)
         self._apply_info_columns()
+        sorted_col, _asc = parse_sort_order(self._settings.get("file_sort_order", "name_asc"))
+        if sorted_col in FILE_INFO_IDS and sorted_col not in prefs["visible"]:
+            self._set_sort_order("name_asc")   # the sorted column was hidden
         if turned_on:
             self._widen_file_list_for_columns()
 
@@ -4890,8 +5152,7 @@ class TagWindowV2:
         cols    = list(table.tableColumns())
         need = 170 + 24 + sum(c.width() + spacing for c in cols if c.identifier() != "name")
         W = self.win.frame().size.width
-        sidebar_w = self.SIDEBAR_W if getattr(self, "_sidebar_visible", True) else 0
-        max_w = max(160, W - sidebar_w - 440)    # same limit as dragging the panel edge
+        max_w = max(FILE_LIST_MIN_W, self._file_list_max_w(W))   # same limit as dragging the edge
         new_w = int(min(max_w, need))
         if new_w <= self._file_list_w:
             return
@@ -4939,6 +5200,7 @@ class TagWindowV2:
     def _media_info_worker(self):
         """Background: fill self._media_info, then ask the main thread to redraw the row.
         Dict writes are atomic, so the main thread can read the cache at any time."""
+        did_work = False
         try:
             while True:
                 gen = self._media_info_gen
@@ -4948,7 +5210,13 @@ class TagWindowV2:
                 with self._media_info_lock:
                     if not pending and gen == self._media_info_gen:
                         self._media_info_busy = False
+                        if did_work:   # only then, or the re-sort would start another pass forever
+                            caller = MainCaller.alloc().init()
+                            caller._cb = self._on_media_pass_done
+                            caller.performSelectorOnMainThread_withObject_waitUntilDone_(
+                                "fire:", None, False)
                         return
+                did_work = True
                 for f, key in pending:
                     if gen != self._media_info_gen:
                         break     # the list changed; rescan it
@@ -5033,13 +5301,10 @@ class TagWindowV2:
                 entries.append((f, f.stat()))
             except OSError:
                 continue
-        if sort == "date_created":
-            key_fn = lambda e: getattr(e[1], "st_birthtime", e[1].st_mtime)
-        elif sort == "date_modified":
-            key_fn = lambda e: e[1].st_mtime
-        else:
-            key_fn = lambda e: e[0].name
-        entries.sort(key=key_fn, reverse=(sort == "name_desc"))
+        cache = getattr(self, "_media_info", {})
+        def info_for(_path, st):
+            return cache.get((st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns))
+        entries = sort_file_entries(entries, sort, info_for)
         return [f for f, _ in entries], {f.name: st.st_ino for f, st in entries}
 
     def _refresh_files(self, external=False):
@@ -5488,6 +5753,18 @@ class TagWindowV2:
     def _set_step_state(self, active=-1, completed=()):
         """active = index of current step (0,1,2 or -1 for none).
            completed = tuple of completed step indices."""
+        self._step_state = (active, tuple(completed))
+        self._paint_step_circles(active, completed)
+
+        # Sync shortcut cards with active step
+        if hasattr(self, "_sc_cards"):
+            bank_for_step = (self._steps[active]
+                             if 0 <= active < len(self._steps) else None)
+            self._set_cards_for_step(bank_for_step)
+            self._set_active_shortcut_card(bank_for_step)
+
+    def _paint_step_circles(self, active=-1, completed=()):
+        """Colors only: crimson for the active step, tan for completed ones."""
         from AppKit import NSColor
         crimson = _hex_color("#8c2232")
         tan     = _hex_color("#dbcca6")
@@ -5510,13 +5787,6 @@ class TagWindowV2:
                 num_lbl.setTextColor_(NSColor.tertiaryLabelColor())
                 self._now_step_labels[i].setTextColor_(
                     NSColor.tertiaryLabelColor())
-
-        # Sync shortcut cards with active step
-        if hasattr(self, "_sc_cards"):
-            bank_for_step = (self._steps[active]
-                             if 0 <= active < len(self._steps) else None)
-            self._set_cards_for_step(bank_for_step)
-            self._set_active_shortcut_card(bank_for_step)
 
     # ── Players section ───────────────────────────────────────────────────────
 
@@ -7974,6 +8244,7 @@ class TagWindowV2:
         col = NSTableColumn.alloc().initWithIdentifier_("name")
         col.setWidth_(PANEL_W - 20)
         col.setEditable_(False)
+        col.setDataCell_(VCenterTextCell.alloc().initTextCell_(""))
         table.addTableColumn_(col)
         scroll.setDocumentView_(table)
 
@@ -7982,6 +8253,7 @@ class TagWindowV2:
         table.setDataSource_(self._naming_clips_delegate)
         table.setDelegate_(self._naming_clips_delegate)
         self._naming_clips_table = table
+        self._apply_file_list_density()
         self._naming_focused_row = -1
         self._refresh_naming_clips()
 
@@ -9969,14 +10241,16 @@ class TagWindowV2:
         make_toggle("auto_advance_after_tag",
                     "Auto-advance after tag",
                     "Move to the next file automatically after each tag is finalized.")
+        sort_opts = list(SORT_LABELS.items())
+        cur_sort  = self._settings.get("file_sort_order", "name_asc")
+        if cur_sort not in SORT_LABELS:   # sorted by clicking an info column header
+            sort_opts.append((cur_sort, sort_order_label(cur_sort)))
         make_dropdown("file_sort_order",
                       "File sort order",
-                      "Order in which video files appear in the list.",
-                      [("name_asc",       "Name A → Z"),
-                       ("name_desc",      "Name Z → A"),
-                       ("date_created",   "Date Created"),
-                       ("date_modified",  "Date Modified")],
-                      post_cb=lambda v: self._refresh_files())
+                      "Order in which video files appear in the list. "
+                      "Click a column header in the list to sort by it.",
+                      sort_opts,
+                      post_cb=lambda v: self._set_sort_order(v))
         make_numeric("search_mode_threshold",
                      "Auto-search threshold",
                      "Enable search mode automatically when roster has ≥ this many players (0 = off).",
@@ -10018,6 +10292,13 @@ class TagWindowV2:
                       post_cb=lambda v: (
                           self._populate_shortcut_pills("players")
                           if hasattr(self, "_sc_scrollviews") else None))
+        make_dropdown("file_list_density",
+                      "Clip list row density",
+                      "Row height of the clip lists in Log Mode and Naming.",
+                      [("compact",     "Compact"),
+                       ("normal",      "Normal"),
+                       ("comfortable", "Comfortable")],
+                      post_cb=lambda v: self._apply_file_list_density())
 
         section_gap()
 
