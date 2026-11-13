@@ -16,6 +16,7 @@ import threading
 import urllib.request
 import sys
 import traceback
+import struct
 import smtplib
 import platform
 from email.mime.text import MIMEText
@@ -156,6 +157,7 @@ DEFAULT_SETTINGS = {
     "show_jersey_numbers":     True,
     "pill_density":            "auto",
     "file_list_width":         260,
+    "file_list_columns":       {"visible": [], "widths": {}},   # info columns in the Log Mode file list
     # Stats
     "record_stats":            True,
     "stats_scope":             "all_time",
@@ -696,6 +698,323 @@ def video_creation_datetime(path: Path):
     """Return (YYYYMMDD, HHMMSS) strings for the video's creation time."""
     dt = video_creation_dt(path)
     return dt.strftime("%Y%m%d"), dt.strftime("%H%M%S")
+
+# ── Clip info columns (Log Mode file list) ────────────────────────────────────
+
+# (id, header title, default width, right-aligned). "name" is always shown first.
+FILE_INFO_COLUMNS = [
+    ("duration",   "Duration",   62, True),
+    ("timecode",   "Timecode",   90, False),
+    ("fps",        "FPS",        52, True),
+    ("resolution", "Resolution", 86, False),
+    ("codec",      "Codec",      84, False),
+    ("audio",      "Audio",      84, False),
+    ("size",       "Size",       64, True),
+    ("recorded",   "Recorded",  118, False),
+]
+FILE_INFO_IDS        = [c[0] for c in FILE_INFO_COLUMNS]
+FILE_INFO_MIN_W      = 36
+FILE_INFO_MAX_W      = 400
+
+CODEC_NAMES = {
+    "avc1": "H.264", "avc3": "H.264",
+    "hvc1": "HEVC",  "hev1": "HEVC",
+    "apch": "ProRes HQ", "apcn": "ProRes 422", "apcs": "ProRes LT",
+    "apco": "ProRes Proxy", "ap4h": "ProRes 4444", "ap4x": "ProRes 4444 XQ",
+    "aprn": "ProRes RAW", "aprh": "ProRes RAW HQ",
+    "av01": "AV1", "vp09": "VP9", "mp4v": "MPEG-4",
+    "mx5p": "MPEG-2", "xdvc": "XDCAM", "xd5c": "XDCAM HD422",
+    "dvh1": "Dolby Vision", "jpeg": "Motion JPEG", "mjpa": "Motion JPEG",
+}
+AUDIO_CODEC_NAMES = {"aac ": "AAC", "lpcm": "PCM", "sowt": "PCM", "twos": "PCM",
+                     "in24": "PCM", "in32": "PCM", "ac-3": "AC-3", "ec-3": "E-AC-3",
+                     "alac": "ALAC", ".mp3": "MP3", "opus": "Opus"}
+
+# Frame rates cameras actually use; a measured rate within 0.02 snaps to one of these
+_COMMON_FPS = [(23.976, "23.976"), (24.0, "24"), (25.0, "25"), (29.97, "29.97"),
+               (30.0, "30"), (47.952, "47.952"), (48.0, "48"), (50.0, "50"),
+               (59.94, "59.94"), (60.0, "60"), (100.0, "100"), (119.88, "119.88"),
+               (120.0, "120"), (239.76, "239.76"), (240.0, "240")]
+
+
+def format_fps(fps):
+    """23.976…, 29.97…, 60.0 → '23.976', '29.97', '60'. None or 0 → ''."""
+    try:
+        fps = float(fps)
+    except (TypeError, ValueError):
+        return ""
+    if fps <= 0:
+        return ""
+    for val, label in _COMMON_FPS:
+        if abs(fps - val) < 0.02:
+            return label
+    return f"{fps:.2f}".rstrip("0").rstrip(".")
+
+
+def format_duration(seconds):
+    """62.4 → '1:02', 3725 → '1:02:05'. Rounds down to whole seconds."""
+    try:
+        s = int(float(seconds))
+    except (TypeError, ValueError):
+        return ""
+    if s < 0:
+        return ""
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+
+def format_bytes(n):
+    """Finder-style decimal sizes: 1 200 000 000 → '1.2 GB'."""
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return ""
+    if n < 0:
+        return ""
+    for unit in ("bytes", "KB", "MB", "GB", "TB"):
+        if n < 1000 or unit == "TB":
+            if unit == "bytes":
+                return f"{int(n)} bytes"
+            return f"{n:.1f} {unit}" if n < 100 else f"{n:.0f} {unit}"
+        n /= 1000.0
+    return ""
+
+
+def frames_to_timecode(frame, quanta, drop_frame=False):
+    """Frame count since 00:00:00:00 → 'HH:MM:SS:FF' (';' before frames when drop-frame).
+    quanta is the whole-number timecode rate (30 for 29.97, 60 for 59.94)."""
+    try:
+        frame, quanta = int(frame), int(quanta)
+    except (TypeError, ValueError):
+        return ""
+    if quanta <= 0 or frame < 0:
+        return ""
+    drop = bool(drop_frame) and quanta % 30 == 0
+    if drop:
+        # SMPTE drop-frame: skip the first 2 (or 4 at 60) frame numbers of every
+        # minute except each tenth minute
+        d          = quanta // 15                 # 2 at 30, 4 at 60
+        per_10min  = quanta * 600 - d * 9
+        per_min    = quanta * 60 - d
+        tens, rem  = divmod(frame, per_10min)
+        if rem > d:
+            frame += d * 9 * tens + d * ((rem - d) // per_min)
+        else:
+            frame += d * 9 * tens
+    ff = frame % quanta
+    ss = (frame // quanta) % 60
+    mm = (frame // (quanta * 60)) % 60
+    hh = (frame // (quanta * 3600)) % 24
+    return f"{hh:02d}:{mm:02d}:{ss:02d}{';' if drop else ':'}{ff:02d}"
+
+
+def file_info_value(info, col_id):
+    """Display text for one info column. None info means still loading."""
+    if info is None:
+        return "…"
+    if col_id == "duration":
+        return format_duration(info.get("duration")) or "—"
+    if col_id == "timecode":
+        if info.get("tc_frame") is None:
+            return "—"
+        return frames_to_timecode(info["tc_frame"], info.get("tc_quanta"),
+                                  info.get("tc_drop")) or "—"
+    if col_id == "fps":
+        return format_fps(info.get("fps")) or "—"
+    if col_id == "resolution":
+        w, h = info.get("width"), info.get("height")
+        return f"{int(w)}×{int(h)}" if w and h else "—"
+    if col_id == "codec":
+        code = info.get("codec") or ""
+        name = CODEC_NAMES.get(code, code.strip().upper())
+        if not name:
+            return "—"
+        return f"{name} HDR" if info.get("hdr") else name
+    if col_id == "audio":
+        ch, rate = info.get("audio_channels"), info.get("audio_rate")
+        if not ch:
+            return "None" if info.get("has_audio") is False else "—"
+        rate_s = f" · {rate / 1000:g} kHz" if rate else ""
+        return f"{int(ch)} ch{rate_s}"
+    if col_id == "size":
+        return format_bytes(info.get("size")) or "—"
+    if col_id == "recorded":
+        dt = info.get("recorded")
+        if not dt:
+            return "—"
+        try:
+            return f"{dt.strftime('%b')} {dt.day}, {dt.year}  {dt.strftime('%H:%M')}"
+        except Exception:
+            return "—"
+    return ""
+
+
+def normalize_column_prefs(prefs):
+    """Clean a saved file_list_columns setting: known ids only, in canonical order,
+    widths clamped. Bad or missing data gives no info columns."""
+    prefs   = prefs if isinstance(prefs, dict) else {}
+    visible = prefs.get("visible")
+    visible = set(visible) if isinstance(visible, (list, tuple)) else set()
+    widths  = prefs.get("widths")
+    widths  = widths if isinstance(widths, dict) else {}
+    clean_w = {}
+    for cid in FILE_INFO_IDS:
+        w = widths.get(cid)
+        if isinstance(w, (int, float)) and not isinstance(w, bool):
+            clean_w[cid] = int(max(FILE_INFO_MIN_W, min(FILE_INFO_MAX_W, w)))
+    return {"visible": [c for c in FILE_INFO_IDS if c in visible], "widths": clean_w}
+
+
+def toggle_info_column(prefs, col_id):
+    """Return new prefs with col_id shown if it was hidden, hidden if it was shown."""
+    prefs = normalize_column_prefs(prefs)
+    if col_id not in FILE_INFO_IDS:
+        return prefs
+    vis = set(prefs["visible"])
+    vis.symmetric_difference_update({col_id})
+    prefs["visible"] = [c for c in FILE_INFO_IDS if c in vis]
+    return prefs
+
+
+def media_info_key(path):
+    """Cache key that survives a rename (same inode) but not a re-export (new mtime/size)."""
+    try:
+        st = Path(path).stat()
+        return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _fourcc(n):
+    try:
+        return struct.pack(">I", int(n) & 0xFFFFFFFF).decode("latin-1")
+    except Exception:
+        return ""
+
+
+def _read_start_timecode(asset, track):
+    """Return (frame, quanta, drop_frame) from a tmcd track, or None."""
+    import AVFoundation, CoreMedia
+    fds = track.formatDescriptions()
+    if not fds:
+        return None
+    fd     = fds[0]
+    quanta = int(CoreMedia.CMTimeCodeFormatDescriptionGetFrameQuanta(fd) or 0)
+    flags  = int(CoreMedia.CMTimeCodeFormatDescriptionGetTimeCodeFlags(fd) or 0)
+    if quanta <= 0:
+        return None
+    reader, _err = AVFoundation.AVAssetReader.assetReaderWithAsset_error_(asset, None)
+    if reader is None:
+        return None
+    out = AVFoundation.AVAssetReaderTrackOutput.assetReaderTrackOutputWithTrack_outputSettings_(
+        track, None)
+    if not reader.canAddOutput_(out):
+        return None
+    reader.addOutput_(out)
+    if not reader.startReading():
+        return None
+    try:
+        for _ in range(8):   # the reader can hand back empty buffers before the sample
+            sb = out.copyNextSampleBuffer()
+            if sb is None:
+                return None
+            bb = CoreMedia.CMSampleBufferGetDataBuffer(sb)
+            if bb is None or CoreMedia.CMBlockBufferGetDataLength(bb) < 4:
+                continue
+            buf = bytearray(4)
+            err, data = CoreMedia.CMBlockBufferCopyDataBytes(bb, 0, 4, buf)
+            if err != 0:
+                return None
+            frame = struct.unpack(">i", bytes(data)[:4])[0]   # 'tmcd' samples are big-endian
+            return frame, quanta, bool(flags & 1)            # kCMTimeCodeFlag_DropFrame
+        return None
+    finally:
+        reader.cancelReading()
+
+
+def clip_media_info(path):
+    """Read duration, timecode, frame rate, size, codec, audio and recorded time.
+    Runs off the main thread; touches no AppKit. Any field it can't read is None,
+    and it never raises."""
+    path = Path(path)
+    info = {"duration": None, "fps": None, "width": None, "height": None,
+            "codec": None, "hdr": False, "tc_frame": None, "tc_quanta": None,
+            "tc_drop": False, "has_audio": None, "audio_channels": None,
+            "audio_rate": None, "size": None, "recorded": None}
+    try:
+        info["size"] = path.stat().st_size
+    except OSError:
+        pass
+    asset = None
+    try:
+        import AVFoundation, CoreMedia
+        from Foundation import NSURL
+        asset = AVFoundation.AVURLAsset.URLAssetWithURL_options_(
+            NSURL.fileURLWithPath_(str(path)), None)
+        d = asset.duration()
+        if d.timescale and d.value >= 0 and not (d.flags & 0x10):   # not indefinite
+            info["duration"] = d.value / float(d.timescale)
+        tracks = list(asset.tracks() or [])
+        info["has_audio"] = any(t.mediaType() == "soun" for t in tracks)
+        for t in tracks:
+            kind = t.mediaType()
+            fds  = t.formatDescriptions() or []
+            fd   = fds[0] if fds else None
+            if kind == "vide" and info["width"] is None:
+                try:
+                    info["fps"] = float(t.nominalFrameRate()) or None
+                    sz, tf = t.naturalSize(), t.preferredTransform()
+                    w = abs(sz.width * tf.a + sz.height * tf.c)
+                    h = abs(sz.width * tf.b + sz.height * tf.d)
+                    info["width"], info["height"] = (round(w), round(h)) if w and h else (None, None)
+                except Exception:
+                    pass
+                if fd is not None:
+                    try:
+                        info["codec"] = _fourcc(CoreMedia.CMFormatDescriptionGetMediaSubType(fd))
+                        ext = CoreMedia.CMFormatDescriptionGetExtensions(fd) or {}
+                        tfn = str(ext.get("CVImageBufferTransferFunction") or "")
+                        info["hdr"] = ("2084" in tfn or "HLG" in tfn or "2100" in tfn)
+                    except Exception:
+                        pass
+            elif kind == "soun" and info["audio_channels"] is None and fd is not None:
+                try:
+                    asbd = CoreMedia.CMAudioFormatDescriptionGetStreamBasicDescription(fd)
+                    if asbd is not None:
+                        info["audio_channels"] = int(asbd.mChannelsPerFrame) or None
+                        info["audio_rate"]     = float(asbd.mSampleRate) or None
+                except Exception:
+                    pass
+            elif kind == "tmcd" and info["tc_frame"] is None:
+                try:
+                    tc = _read_start_timecode(asset, t)
+                    if tc:
+                        info["tc_frame"], info["tc_quanta"], info["tc_drop"] = tc
+                except Exception:
+                    pass
+        try:
+            items = AVFoundation.AVMetadataItem.metadataItemsFromArray_withKey_keySpace_(
+                asset.commonMetadata(),
+                AVFoundation.AVMetadataCommonKeyCreationDate,
+                AVFoundation.AVMetadataKeySpaceCommon)
+            if items and len(items) > 0:
+                val = str(items[0].stringValue() or "").strip()
+                if len(val) >= 19:
+                    info["recorded"] = datetime.strptime(
+                        val[:19].replace("T", " "), "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+    except Exception:
+        pass
+    if info["recorded"] is None:
+        try:
+            st = path.stat()
+            info["recorded"] = datetime.fromtimestamp(
+                getattr(st, "st_birthtime", None) or st.st_mtime)
+        except Exception:
+            pass
+    return info
 
 def resolve_convention(preset, file_path=None, session=None):
     """Build a filename stem from an ordered list of field tokens in a naming preset."""
@@ -1469,18 +1788,22 @@ def _install_cmd_z_monitor(tag_window):
         1 << 10, handler)   # NSEventMaskKeyDown
 
 
-def _style_reject_cell(owner, cell, row):
-    """Strike through and dim a clip marked as a reject in a file list."""
+def _style_reject_cell(owner, cell, row, text=None):
+    """Strike through and dim a clip marked as a reject in a file list.
+    text is the cell's string when it isn't the clip name (an info column)."""
     if not owner or not (0 <= row < len(owner._files)):
         return
     name = owner._files[row].name
     if name not in getattr(owner, "_rejected", ()):
         return
+    if text is not None:
+        name = text
     from AppKit import (NSAttributedString, NSMutableParagraphStyle, NSColor,
                         NSStrikethroughStyleAttributeName, NSFontAttributeName,
                         NSForegroundColorAttributeName, NSParagraphStyleAttributeName)
     para = NSMutableParagraphStyle.alloc().init()
     para.setLineBreakMode_(3)
+    para.setAlignment_(cell.alignment())   # info columns can be right-aligned
     attrs = {
         NSStrikethroughStyleAttributeName: 1,
         NSForegroundColorAttributeName:    NSColor.tertiaryLabelColor(),
@@ -2030,12 +2353,26 @@ def make_objc_classes():
 
         def tableView_objectValueForTableColumn_row_(self, tv, col, row):
             if self.owner and row < len(self.owner._files):
-                return self.owner._files[row].name
+                cid = col.identifier() if col is not None else "name"
+                if cid == "name":
+                    return self.owner._files[row].name
+                return self.owner._file_info_text(row, cid)
             return ""
 
         def tableView_willDisplayCell_forTableColumn_row_(self, tv, cell, col, row):
-            cell.setLineBreakMode_(3)  # NSLineBreakByTruncatingHead — shows end of filename where labels are
-            _style_reject_cell(self.owner, cell, row)
+            cid = col.identifier() if col is not None else "name"
+            if cid == "name":
+                cell.setLineBreakMode_(3)  # NSLineBreakByTruncatingHead — shows end of filename where labels are
+                _style_reject_cell(self.owner, cell, row)
+            else:
+                cell.setLineBreakMode_(4)  # truncate tail
+                _style_reject_cell(self.owner, cell, row,
+                                   text=self.owner._file_info_text(row, cid) if self.owner else "")
+
+        def tableViewColumnDidResize_(self, notif):
+            col = notif.userInfo().get("NSTableColumn") if notif.userInfo() else None
+            if self.owner and col is not None and col.identifier() != "name":
+                self.owner._on_info_column_resized(col.identifier(), col.width())
 
         def tableViewSelectionDidChange_(self, notif):
             if not self.owner:
@@ -4322,7 +4659,7 @@ class TagWindowV2:
 
     def _build_file_list(self, cv, W, H, SIDEBAR_W, TOP_H):
         from AppKit import (
-            NSView, NSScrollView, NSTableColumn,
+            NSView, NSScrollView, NSTableColumn, NSImageView, NSImage,
             NSTextField, NSFont, NSColor, NSMakeRect, NSIndexSet,
         )
 
@@ -4355,7 +4692,7 @@ class TagWindowV2:
             (FILE_LIST_W - lbl_sz.width) / 2,
             panel_h - HEADER_STRIP_H + (HEADER_STRIP_H - lbl_sz.height) / 2,
             lbl_sz.width, lbl_sz.height))
-        hdr.setAutoresizingMask_(8)  # MinYMargin — stays pinned to top of panel
+        hdr.setAutoresizingMask_(1 | 4 | 8)  # stays centred as the panel widens, pinned to top
         panel.addSubview_(hdr)
 
         # Scroll + table
@@ -4364,10 +4701,12 @@ class TagWindowV2:
         scroll = NSScrollView.alloc().initWithFrame_(
             NSMakeRect(0, scroll_y, FILE_LIST_W, scroll_h))
         scroll.setHasVerticalScroller_(True)
+        scroll.setHasHorizontalScroller_(True)   # info columns can outgrow the panel
         scroll.setAutohidesScrollers_(True)
         scroll.setDrawsBackground_(False)
         scroll.setAutoresizingMask_(2 | 16)  # widthSizable + heightSizable
         panel.addSubview_(scroll)
+        self._file_list_scroll = scroll
 
         table = KeyTableView.alloc().initWithFrame_(
             NSMakeRect(0, 0, FILE_LIST_W, scroll_h))
@@ -4377,14 +4716,48 @@ class TagWindowV2:
         table.setGridStyleMask_(0)
         table.setUsesAlternatingRowBackgroundColors_(False)
         table.setSelectionHighlightStyle_(1)  # NSTableViewSelectionHighlightStyleRegular
+        table.setAllowsColumnReordering_(False)
+        table.setAllowsColumnResizing_(True)
+        # The name column takes up (or gives back) any width the info columns don't use
+        table.setColumnAutoresizingStyle_(5)   # NSTableViewFirstColumnOnlyAutoresizingStyle
+        self._file_list_header = table.headerView()   # kept so it can be shown again
         table.setHeaderView_(None)
 
         col = NSTableColumn.alloc().initWithIdentifier_("name")
         col.setWidth_(FILE_LIST_W - 20)
+        col.setMinWidth_(90)
+        col.setMaxWidth_(100000)
         col.setEditable_(False)
+        col.setResizingMask_(1 | 2)   # autoresizing + user resizing
+        col.headerCell().setStringValue_("Name")
         table.addTableColumn_(col)
 
         scroll.setDocumentView_(table)
+
+        # Columns button — right end of the header strip; opens the show/hide menu
+        cb_sz = 22
+        col_btn = PillButton.alloc().initWithFrame_(NSMakeRect(
+            FILE_LIST_W - cb_sz - 8,
+            panel_h - HEADER_STRIP_H + (HEADER_STRIP_H - cb_sz) / 2, cb_sz, cb_sz))
+        col_btn.layer().setCornerRadius_(6.0)
+        col_btn.setAutoresizingMask_(1 | 8)   # right-anchored, pinned to top
+        col_btn.setToolTip_("Show or hide clip info columns")
+        cb_icon = NSImageView.alloc().initWithFrame_(NSMakeRect(3, 3, cb_sz - 6, cb_sz - 6))
+        cb_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            "tablecells", "Columns")
+        if cb_img:
+            cb_icon.setImage_(cb_img)
+        cb_icon.setContentTintColor_(NSColor.secondaryLabelColor())
+        col_btn.addSubview_(cb_icon)
+        col_btn.setClickHandler_(lambda v, e: self._show_columns_menu(v))
+        panel.addSubview_(col_btn)
+        self._file_columns_btn = col_btn
+
+        self._media_info      = {}     # media_info_key → clip_media_info dict
+        self._media_info_gen  = 0      # bumped to stop a stale background pass
+        self._media_info_busy = False
+        self._media_info_lock = threading.Lock()
+        self._col_menu_targets = []
 
         self._files            = []
         self._file_inodes      = {}      # {name: inode} from the last scan, to spot Finder renames
@@ -4397,6 +4770,7 @@ class TagWindowV2:
         table.setDataSource_(self._file_list_delegate)
         table.setDelegate_(self._file_list_delegate)
         self._file_list_table = table
+        self._apply_info_columns()
 
         self._build_empty_state_overlay(panel, FILE_LIST_W, panel_h)
         self._refresh_files()
@@ -4410,6 +4784,194 @@ class TagWindowV2:
         handle.setAutoresizingMask_(16)  # heightSizable
         cv.addSubview_(handle)
         self._fl_resize_handle = handle
+
+    # ── Clip info columns ─────────────────────────────────────────────────────
+
+    def _column_prefs(self):
+        return normalize_column_prefs(self._settings.get("file_list_columns"))
+
+    def _apply_info_columns(self):
+        """Rebuild the file list's info columns from the saved prefs. The header row
+        only shows while at least one info column is on."""
+        if not hasattr(self, "_file_list_table"):
+            return
+        from AppKit import NSTableColumn, NSFont, NSColor
+        table = self._file_list_table
+        prefs = self._column_prefs()
+        self._applying_columns = True
+        try:
+            for c in list(table.tableColumns()):
+                if c.identifier() != "name":
+                    table.removeTableColumn_(c)
+            titles = {cid: (title, w, right) for cid, title, w, right in FILE_INFO_COLUMNS}
+            for cid in prefs["visible"]:
+                title, default_w, right = titles[cid]
+                col = NSTableColumn.alloc().initWithIdentifier_(cid)
+                col.setEditable_(False)
+                col.setMinWidth_(FILE_INFO_MIN_W)
+                col.setMaxWidth_(FILE_INFO_MAX_W)
+                col.setResizingMask_(2)   # user resizing only; the name column absorbs the rest
+                col.setWidth_(prefs["widths"].get(cid, default_w))
+                col.headerCell().setStringValue_(title)
+                cell = col.dataCell()
+                cell.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(11.5, 0.0))
+                cell.setTextColor_(NSColor.secondaryLabelColor())
+                if right:
+                    cell.setAlignment_(1)              # NSTextAlignmentRight
+                    col.headerCell().setAlignment_(1)
+                table.addTableColumn_(col)
+            want_header = bool(prefs["visible"])
+            if want_header and table.headerView() is None:
+                table.setHeaderView_(self._file_list_header)
+                self._file_list_header.setMenu_(self._build_columns_menu())
+            elif not want_header and table.headerView() is not None:
+                table.setHeaderView_(None)
+            if want_header:
+                self._file_list_header.setMenu_(self._build_columns_menu())
+            if hasattr(self, "_file_list_scroll"):
+                self._file_list_scroll.tile()
+            table.sizeToFit()
+            table.reloadData()
+        finally:
+            self._applying_columns = False
+        self._queue_media_info()
+
+    def _build_columns_menu(self):
+        from AppKit import NSMenu, NSMenuItem
+        menu = NSMenu.alloc().initWithTitle_("Columns")
+        menu.setAutoenablesItems_(False)
+        tgt = MenuTarget.alloc().init()
+        tgt._callback = self._toggle_info_column
+        self._col_menu_targets = [tgt]      # ObjC doesn't retain menu targets
+        hdr = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Show Columns", None, "")
+        hdr.setEnabled_(False)
+        menu.addItem_(hdr)
+        visible = set(self._column_prefs()["visible"])
+        for cid, title, _w, _r in FILE_INFO_COLUMNS:
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, "menuPicked:", "")
+            item.setTarget_(tgt)
+            item.setRepresentedObject_(cid)
+            item.setState_(1 if cid in visible else 0)
+            menu.addItem_(item)
+        menu.addItem_(NSMenuItem.separatorItem())
+        reset = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Reset Column Widths", "menuPicked:", "")
+        reset.setTarget_(tgt)
+        reset.setRepresentedObject_("__reset_widths__")
+        reset.setEnabled_(bool(self._column_prefs()["widths"]))
+        menu.addItem_(reset)
+        return menu
+
+    def _show_columns_menu(self, anchor_view):
+        menu = self._build_columns_menu()
+        h = anchor_view.frame().size.height
+        menu.popUpMenuPositioningItem_atLocation_inView_(None, (0, h + 4), anchor_view)
+
+    def _toggle_info_column(self, col_id):
+        if col_id == "__reset_widths__":
+            prefs = self._column_prefs()
+            prefs["widths"] = {}
+        else:
+            prefs = toggle_info_column(self._column_prefs(), col_id)
+        turned_on = col_id in prefs["visible"]
+        self._settings["file_list_columns"] = prefs
+        _save_setting("file_list_columns", prefs)
+        self._apply_info_columns()
+        if turned_on:
+            self._widen_file_list_for_columns()
+
+    def _widen_file_list_for_columns(self):
+        """Grow the file list panel so the info columns fit beside a readable name,
+        as far as the window allows. It never shrinks the panel."""
+        if not (hasattr(self, "_file_list_table") and hasattr(self, "win")):
+            return
+        table   = self._file_list_table
+        spacing = table.intercellSpacing().width
+        cols    = list(table.tableColumns())
+        need = 170 + 24 + sum(c.width() + spacing for c in cols if c.identifier() != "name")
+        W = self.win.frame().size.width
+        sidebar_w = self.SIDEBAR_W if getattr(self, "_sidebar_visible", True) else 0
+        max_w = max(160, W - sidebar_w - 440)    # same limit as dragging the panel edge
+        new_w = int(min(max_w, need))
+        if new_w <= self._file_list_w:
+            return
+        self._file_list_w = new_w
+        self._settings["file_list_width"] = new_w
+        _save_setting("file_list_width", new_w)
+        H = self.win.contentView().frame().size.height
+        self._reposition_layout(W, H)
+        if hasattr(self, "_sc_scrollviews"):
+            self._populate_shortcut_pills(getattr(self, "_sc_current_bank", "players"))
+
+    def _on_info_column_resized(self, col_id, width):
+        """Remember a dragged column width; saved shortly after the drag settles."""
+        if getattr(self, "_applying_columns", False):
+            return
+        prefs = self._column_prefs()
+        prefs["widths"][col_id] = int(max(FILE_INFO_MIN_W, min(FILE_INFO_MAX_W, width)))
+        self._settings["file_list_columns"] = prefs
+        if getattr(self, "_col_save_caller", None) is None:
+            self._col_save_caller = MainCaller.alloc().init()
+            self._col_save_caller._cb = lambda: _save_setting(
+                "file_list_columns", self._column_prefs())
+        from Foundation import NSObject
+        NSObject.cancelPreviousPerformRequestsWithTarget_(self._col_save_caller)
+        self._col_save_caller.performSelector_withObject_afterDelay_("fire:", None, 0.4)
+
+    def _file_info_text(self, row, col_id):
+        if not (0 <= row < len(self._files)):
+            return ""
+        key = media_info_key(self._files[row])
+        return file_info_value(self._media_info.get(key) if key else {}, col_id)
+
+    def _queue_media_info(self):
+        """Read clip info for files not yet cached, one at a time in the background,
+        only while an info column is showing."""
+        if not self._column_prefs()["visible"] or not self._files:
+            return
+        with self._media_info_lock:
+            self._media_info_gen += 1
+            if self._media_info_busy:
+                return    # the running pass rescans the list when it sees the new gen
+            self._media_info_busy = True
+        threading.Thread(target=self._media_info_worker, daemon=True).start()
+
+    def _media_info_worker(self):
+        """Background: fill self._media_info, then ask the main thread to redraw the row.
+        Dict writes are atomic, so the main thread can read the cache at any time."""
+        try:
+            while True:
+                gen = self._media_info_gen
+                pending = [(f, k) for f in list(self._files)
+                           for k in (media_info_key(f),)
+                           if k is not None and k not in self._media_info]
+                with self._media_info_lock:
+                    if not pending and gen == self._media_info_gen:
+                        self._media_info_busy = False
+                        return
+                for f, key in pending:
+                    if gen != self._media_info_gen:
+                        break     # the list changed; rescan it
+                    self._media_info[key] = clip_media_info(f)
+                    caller = MainCaller.alloc().init()
+                    caller._cb = lambda n=f.name: self._on_media_info_ready(n)
+                    caller.performSelectorOnMainThread_withObject_waitUntilDone_(
+                        "fire:", None, False)
+        except Exception:
+            with self._media_info_lock:
+                self._media_info_busy = False
+
+    def _on_media_info_ready(self, name):
+        if not hasattr(self, "_file_list_table"):
+            return
+        for i, f in enumerate(self._files):
+            if f.name == name:
+                from AppKit import NSIndexSet
+                table = self._file_list_table
+                cols = NSIndexSet.indexSetWithIndexesInRange_((0, table.numberOfColumns()))
+                table.reloadDataForRowIndexes_columnIndexes_(
+                    NSIndexSet.indexSetWithIndex_(i), cols)
+                break
 
     def _build_empty_state_overlay(self, panel, FILE_LIST_W, panel_h):
         from AppKit import NSView, NSTextField, NSFont, NSColor, NSMakeRect
@@ -4535,6 +5097,8 @@ class TagWindowV2:
                     msg = "No video files found"
                 self._empty_state_msg.setStringValue_(msg)
         self._refresh_naming_clips()
+        if hasattr(self, "_media_info"):
+            self._queue_media_info()
 
         if prev_name is not None:
             self._follow_selected_clip(prev_name, renames, new_idx, external)

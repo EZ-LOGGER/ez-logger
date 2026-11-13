@@ -937,3 +937,106 @@ def test_stat_segments_share_steps_before_player():
                        ["plays", "players", "zone", "ratings"])
     rows = renamer.stat_rows_for_segment(*segs[1], order)
     assert rows[0][:3] == ("JONES", "LAYUP_PAINT", "GOOD")
+
+
+# ── Clip info columns ────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("frame,quanta,drop,expected", [
+    (0, 25, False, "00:00:00:00"),
+    (900012, 25, False, "10:00:00:12"),
+    (0, 30, True, "00:00:00;00"),
+    (1799, 30, True, "00:00:59;29"),
+    (1800, 30, True, "00:01:00;02"),       # ;00 and ;01 are dropped
+    (17982, 30, True, "00:10:00;00"),      # every tenth minute keeps them
+    (111582, 30, True, "01:02:03;04"),
+    (3598, 60, True, "00:00:59;58"),
+    (3600, 60, True, "00:01:00;04"),       # 60 fps drops four
+    (1800, 30, False, "00:01:00:00"),
+    (1800, 24, True, "00:01:15:00"),       # drop-frame only applies to 30/60
+])
+def test_frames_to_timecode(frame, quanta, drop, expected):
+    assert renamer.frames_to_timecode(frame, quanta, drop) == expected
+
+
+def test_frames_to_timecode_bad_input():
+    assert renamer.frames_to_timecode(None, 30) == ""
+    assert renamer.frames_to_timecode(10, 0) == ""
+    assert renamer.frames_to_timecode(-1, 30) == ""
+
+
+@pytest.mark.parametrize("fps,expected", [
+    (23.976024627685547, "23.976"), (29.970029830932617, "29.97"), (59.94, "59.94"),
+    (60.0, "60"), (25, "25"), (119.88, "119.88"), (12.5, "12.5"), (0, ""), (None, ""),
+])
+def test_format_fps(fps, expected):
+    assert renamer.format_fps(fps) == expected
+
+
+@pytest.mark.parametrize("secs,expected", [
+    (0, "0:00"), (3.003, "0:03"), (62.9, "1:02"), (3725, "1:02:05"), (None, ""), (-1, ""),
+])
+def test_format_duration(secs, expected):
+    assert renamer.format_duration(secs) == expected
+
+
+@pytest.mark.parametrize("n,expected", [
+    (512, "512 bytes"), (2_446_999, "2.4 MB"), (1_200_000_000, "1.2 GB"),
+    (150_000_000, "150 MB"), (None, ""),
+])
+def test_format_bytes(n, expected):
+    assert renamer.format_bytes(n) == expected
+
+
+def test_file_info_value_loading_and_missing():
+    assert renamer.file_info_value(None, "fps") == "…"
+    assert renamer.file_info_value({}, "timecode") == "—"
+    assert renamer.file_info_value({"has_audio": False}, "audio") == "None"
+
+
+def test_file_info_value_fields():
+    info = {"duration": 42.2, "fps": 29.97, "width": 1080, "height": 1920,
+            "codec": "hvc1", "hdr": True, "tc_frame": 111582, "tc_quanta": 30,
+            "tc_drop": True, "audio_channels": 2, "audio_rate": 48000.0,
+            "size": 2_446_999, "recorded": datetime(2026, 11, 13, 19, 42)}
+    v = lambda c: renamer.file_info_value(info, c)
+    assert v("duration") == "0:42"
+    assert v("timecode") == "01:02:03;04"
+    assert v("resolution") == "1080×1920"
+    assert v("codec") == "HEVC HDR"
+    assert v("audio") == "2 ch · 48 kHz"
+    assert v("recorded") == "Nov 13, 2026  19:42"
+    assert renamer.file_info_value({"codec": "zzzz"}, "codec") == "ZZZZ"
+
+
+def test_normalize_column_prefs():
+    assert renamer.normalize_column_prefs(None) == {"visible": [], "widths": {}}
+    p = renamer.normalize_column_prefs({
+        "visible": ["size", "bogus", "duration"],
+        "widths": {"size": 5, "fps": 9999, "duration": "wide", "bogus": 50, "codec": True}})
+    assert p["visible"] == ["duration", "size"]       # canonical order, unknown dropped
+    assert p["widths"] == {"size": renamer.FILE_INFO_MIN_W, "fps": renamer.FILE_INFO_MAX_W}
+
+
+def test_toggle_info_column():
+    p = renamer.toggle_info_column({"visible": ["fps"], "widths": {"fps": 60}}, "duration")
+    assert p == {"visible": ["duration", "fps"], "widths": {"fps": 60}}
+    p = renamer.toggle_info_column(p, "fps")
+    assert p["visible"] == ["duration"] and p["widths"] == {"fps": 60}
+    assert renamer.toggle_info_column(p, "nope")["visible"] == ["duration"]
+
+
+def test_media_info_key_survives_rename(tmp_path):
+    f = tmp_path / "a.mov"
+    f.write_bytes(b"x" * 10)
+    k1 = renamer.media_info_key(f)
+    g = tmp_path / "b.mov"
+    f.rename(g)   # test fixture only, not a clip
+    assert renamer.media_info_key(g) == k1
+    assert renamer.media_info_key(tmp_path / "missing.mov") is None
+
+
+def test_clip_media_info_never_raises(tmp_path):
+    f = tmp_path / "x.mov"
+    f.write_bytes(b"not a movie")
+    info = renamer.clip_media_info(f)    # AVFoundation is stubbed here
+    assert info["size"] == 11 and info["duration"] is None and info["recorded"] is not None
