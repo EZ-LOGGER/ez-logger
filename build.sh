@@ -61,12 +61,23 @@ echo ""
 if [ "$SIGN" = true ]; then
     echo "🔏 Signing all binaries inside the app..."
     # 1. Individual binaries (including Sparkle's Autoupdate plain binary)
-    find "$APP_PATH" -type f \( -name "*.so" -o -name "*.dylib" -o -name "python*" -o -name "Python" -o -name "Autoupdate" \) | while read -r bin; do
-        codesign --force --options runtime \
-          --sign "$SIGN_ID" \
-          --timestamp \
-          "$bin" 2>/dev/null || true
-    done
+    # A failed signature here gets the whole build rejected by Apple, so retry
+    # once (the timestamp server can hiccup) and stop with the error if it still fails.
+    SIGN_FAILS=0
+    while read -r bin; do
+        if ! codesign --force --options runtime --sign "$SIGN_ID" --timestamp "$bin" 2>/tmp/ezl_sign_err; then
+            sleep 2
+            if ! codesign --force --options runtime --sign "$SIGN_ID" --timestamp "$bin" 2>/tmp/ezl_sign_err; then
+                echo "❌ Could not sign: ${bin#$APP_PATH/}"
+                sed 's/^/     /' /tmp/ezl_sign_err | head -3
+                SIGN_FAILS=$((SIGN_FAILS + 1))
+            fi
+        fi
+    done < <(find "$APP_PATH" -type f \( -name "*.so" -o -name "*.dylib" -o -name "python*" -o -name "Python" -o -name "Autoupdate" \))
+    if [ "$SIGN_FAILS" -gt 0 ]; then
+        echo "❌ $SIGN_FAILS binaries could not be signed. Not submitting to Apple."
+        exit 1
+    fi
     # 2. XPC service bundles inside Sparkle (must be signed before the framework)
     find "$APP_PATH" -name "*.xpc" -type d | while read -r xpc; do
         codesign --force --options runtime \
@@ -97,6 +108,14 @@ if [ "$SIGN" = true ]; then
       --sign "$SIGN_ID" \
       --timestamp \
       "$APP_PATH"
+    # Every binary must carry the Developer ID signature, or notarization fails
+    UNSIGNED=$(find "$APP_PATH" -type f \( -name "*.so" -o -name "*.dylib" \) -exec sh -c \
+      'codesign -dvv "$1" 2>&1 | grep -q "Authority=Developer ID Application" || echo "$1"' _ {} \; | head -5)
+    if [ -n "$UNSIGNED" ]; then
+        echo "❌ Some binaries are not Developer ID signed:"
+        echo "$UNSIGNED" | sed 's/^/     /'
+        exit 1
+    fi
     echo "✅ Signed."
     echo ""
 
@@ -107,9 +126,15 @@ if [ "$SIGN" = true ]; then
 
     echo "📤 Submitting to Apple for notarization..."
     echo "   (This takes 1-5 minutes)"
-    xcrun notarytool submit "$ZIP_PATH" \
+    NOTARY_OUT=$(xcrun notarytool submit "$ZIP_PATH" \
       --keychain-profile "$KEYCHAIN_PROFILE" \
-      --wait
+      --wait 2>&1) || true
+    echo "$NOTARY_OUT" | tail -4
+    if ! echo "$NOTARY_OUT" | grep -q "status: Accepted"; then
+        echo "❌ Apple did not accept the app. See why with:"
+        echo "   xcrun notarytool log <submission id> --keychain-profile $KEYCHAIN_PROFILE"
+        exit 1
+    fi
     echo ""
 
     echo "📎 Stapling notarization ticket..."
