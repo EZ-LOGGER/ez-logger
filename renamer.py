@@ -1290,9 +1290,26 @@ class SafeRenamer:
                              error=reason, action="trash")
             return False, reason
         ok, trash_path, err = _trash_file(src)
+        if not ok and err.startswith(NO_TRASH_PREFIX):
+            # No Trash on this drive (a NAS share): move it into the share's recycle
+            # bin, or a _Trash folder beside it. Still a move, never a delete.
+            ok, trash_path, err = SafeRenamer._move_to_no_trash_bin(src, folder_root)
         SafeRenamer._log(src, Path(trash_path or "TRASH"), session, success=ok,
                          error=err, action="trash")
         return (True, trash_path) if ok else (False, err)
+
+    @staticmethod
+    def _move_to_no_trash_bin(src: Path, folder_root: Path):
+        """Returns (ok, new_path, error). Creates the destination folders it needs."""
+        try:
+            dst = no_trash_destination(src, folder_root, nas_recycle_dir(src))
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if os.path.lexists(str(dst)):        # appeared since the name was picked
+                return False, "", f"{dst.name} already exists in the recycle bin"
+            src.rename(dst)
+            return True, str(dst), ""
+        except Exception as e:
+            return False, "", f"couldn't move it to the recycle bin: {e}"
 
     @staticmethod
     def safe_restore(trash_path: Path, dst: Path, folder_root: Path,
@@ -1305,7 +1322,7 @@ class SafeRenamer:
             return False, msg
 
         if not _is_in_trash(trash_path):
-            return fail("source is not in the Trash")
+            return fail("source is not in the Trash or a recycle bin")
         if not os.path.isfile(str(trash_path)) or os.path.islink(str(trash_path)):
             return fail("no longer in the Trash")
         real_folder = os.path.realpath(str(folder_root))
@@ -1710,6 +1727,24 @@ def pick_selection(names, prev_name, renames, prev_idx):
     return max(0, min(prev_idx, len(names) - 1))
 
 
+def follow_multi_selection(names, selected, renames, lead_idx):
+    """Rows to keep selected after the list reloads: every previously selected clip
+    still in the folder (followed through a rename), plus the lead row."""
+    rows = set()
+    for n in selected:
+        cur = renames.get(n, n)
+        if cur in names:
+            rows.add(names.index(cur))
+    if lead_idx >= 0:
+        rows.add(lead_idx)
+    return sorted(rows)
+
+
+def reject_toggle_target(names, rejected):
+    """X on several clips: mark them all unless every one is already a reject."""
+    return not all(n in rejected for n in names)
+
+
 def rejected_names(records, names):
     """Return the clip names in `names` that are marked as rejects."""
     return {n for n in names if (records.get(n) or {}).get("reject")}
@@ -1755,14 +1790,87 @@ def _trash_file(path):
         if ok:
             return True, (str(result_url.path()) if result_url is not None else ""), ""
         msg = str(err.localizedDescription()) if err is not None else ""
+        # NSFeatureUnsupportedError: the volume (a NAS share, say) has no Trash
+        if err is not None and int(err.code()) == 3328:
+            return False, "", NO_TRASH_PREFIX + (msg or "this drive has no Trash")
         return False, "", msg or "this drive has no Trash"
     except Exception as e:
         return False, "", str(e)
 
 
+NO_TRASH_PREFIX   = "NO_TRASH:"
+NAS_RECYCLE_NAMES = ("@Recycle", "#recycle")   # QNAP, Synology share recycle bins
+FOLDER_TRASH_NAME = "_Trash"                   # last resort, inside the clip folder
+
+
+def _volume_root(path):
+    """The mount point that holds path (the share root for a NAS)."""
+    p = os.path.realpath(str(path))
+    while not os.path.ismount(p):
+        parent = os.path.dirname(p)
+        if parent == p:
+            break
+        p = parent
+    return p
+
+
+def nas_recycle_dir(path):
+    """The share's own recycle bin folder, when it has one we can write to, else None."""
+    root = _volume_root(path)
+    for name in NAS_RECYCLE_NAMES:
+        d = os.path.join(root, name)
+        if os.path.isdir(d) and os.access(d, os.W_OK):
+            return Path(d)
+    return None
+
+
+def no_trash_destination(src, folder_root, recycle_dir=None):
+    """Where a clip goes on a drive with no Trash. With the NAS's recycle bin it
+    keeps its path under the share, as the NAS itself does, so the NAS can restore
+    it; otherwise it goes to a _Trash folder in the clip folder. A name already
+    taken gets ' (2)', ' (3)'... before the extension. Never overwrites."""
+    src = Path(src)
+    if recycle_dir is not None:
+        rel = os.path.relpath(os.path.realpath(str(src.parent)),
+                              _volume_root(src))
+        base = Path(recycle_dir) / rel if rel != "." else Path(recycle_dir)
+    else:
+        base = Path(folder_root) / FOLDER_TRASH_NAME
+    dst, n = base / src.name, 2
+    while os.path.lexists(str(dst)):
+        dst = base / f"{src.stem} ({n}){src.suffix}"
+        n += 1
+    return dst
+
+
+def recycle_bin_note(items):
+    """A line for clips that went somewhere other than the Mac Trash, or ''."""
+    paths = [Path(i.get("trash_path", "")) for i in items]
+    nas = [p for p in paths if any(n in p.parts for n in NAS_RECYCLE_NAMES)]
+    local = [p for p in paths if p.parent.name == FOLDER_TRASH_NAME]
+    lines = []
+    if nas:
+        bin_name = next(n for n in NAS_RECYCLE_NAMES if n in nas[0].parts)
+        lines.append(f"This drive has no Trash, so {len(nas)} clip(s) went to the "
+                     f"NAS recycle bin ({bin_name}). You can restore them there.")
+    if local:
+        lines.append(f"This drive has no Trash or recycle bin, so {len(local)} clip(s) "
+                     f"went to the {FOLDER_TRASH_NAME} folder inside this folder. "
+                     "Delete that folder in Finder when you're sure.")
+    if lines:
+        lines.append("⌘Z puts them back.")
+    return "\n\n".join(lines)
+
+
 def _is_in_trash(path):
-    parts = Path(os.path.realpath(str(path))).parts
-    return ".Trash" in parts or ".Trashes" in parts
+    """In the Mac Trash, a NAS recycle bin, or a clip folder's _Trash folder."""
+    real = Path(os.path.realpath(str(path)))
+    parts = real.parts
+    if ".Trash" in parts or ".Trashes" in parts:
+        return True
+    if any(n in parts for n in NAS_RECYCLE_NAMES):
+        return True
+    return real.parent.name == FOLDER_TRASH_NAME
 
 
 # ── Finder color labels ───────────────────────────────────────────────────────
@@ -2280,10 +2388,21 @@ def make_objc_classes():
                 if self.owner and hasattr(self.owner, "handle_cmd_z"):
                     self.owner.handle_cmd_z()
                 return
-            # ⌘⌫ → move the current clip to the Trash
-            if chars == "\x7f" and (event.modifierFlags() & 0x100000):
+            flags = event.modifierFlags()
+            # ⌘⌫ → move the selected clips to the Trash
+            if chars == "\x7f" and (flags & 0x100000):
                 if self.owner and hasattr(self.owner, "_trash_current_clip"):
                     self.owner._trash_current_clip()
+                return
+            # ⌘A → select every clip
+            if chars == "a" and (flags & 0x100000) and self.owner is not None:
+                if getattr(self.owner, "step", None) is None:
+                    self.selectAll_(None)
+                return
+            # ⇧↑ / ⇧↓ → extend the selection (NSTableView's own handling)
+            if chars in ("", "") and (flags & 0x20000):
+                if self.owner is None or getattr(self.owner, "step", None) is None:
+                    objc.super(_KeyTableView, self).keyDown_(event)
                 return
             if self.owner:
                 self.owner.handle_key(chars)
@@ -2298,6 +2417,20 @@ def make_objc_classes():
 
         def acceptsFirstResponder(self):
             return True
+
+        def menuForEvent_(self, event):
+            """Right-click: act on the selection, or on the clicked clip when it
+            isn't part of the selection (like Finder)."""
+            owner = self.owner
+            if owner is None or not hasattr(owner, "_file_context_menu"):
+                return None
+            pt  = self.convertPoint_fromView_(event.locationInWindow(), None)
+            row = self.rowAtPoint_(pt)
+            if row < 0:
+                return None
+            if not self.selectedRowIndexes().containsIndex_(row):
+                owner._select_file_row(row)
+            return owner._file_context_menu()
 
     KeyTableView = _KeyTableView
 
@@ -2552,8 +2685,14 @@ def make_objc_classes():
         def tableViewSelectionDidChange_(self, notif):
             if not self.owner:
                 return
-            row = notif.object().selectedRow()
-            if row >= 0:
+            table = notif.object()
+            row   = table.selectedRow()
+            sel   = table.selectedRowIndexes()
+            if sel.count() and not sel.containsIndex_(row):
+                row = sel.lastIndex()     # ⌘-click took the lead row out
+            if table.numberOfSelectedRows() > 1:
+                self.owner._on_multi_selected(row)
+            elif row >= 0:
                 self.owner._on_file_selected(row)
 
     FileListDelegate = _FileListDelegate
@@ -4247,6 +4386,7 @@ class TagWindowV2:
             if self._selected_file_idx < 0 or not self._files:
                 return
             if self.step is None:
+                self._collapse_selection()
                 self._reset_tag_state()
                 self._start_player_step()
             elif self.step is not None:
@@ -4351,6 +4491,7 @@ class TagWindowV2:
         if self.step is None:
             if bank != self._steps[0] or self._selected_file_idx < 0 or not self._files:
                 return
+            self._collapse_selection()
             self._reset_tag_state()
             self._start_player_step()
         if self.step != bank:
@@ -4372,7 +4513,110 @@ class TagWindowV2:
         self._file_list_table.scrollRowToVisible_(idx)
         self._on_file_selected(idx)
 
+    def _selected_log_files(self):
+        """Clips selected in the Log Mode file list, in list order."""
+        if not hasattr(self, "_file_list_table"):
+            return []
+        sel = self._file_list_table.selectedRowIndexes()
+        rows, i = [], sel.firstIndex()
+        while 0 <= i < len(self._files):
+            rows.append(i)
+            i = sel.indexGreaterThanIndex_(i)
+        return [self._files[r] for r in rows]
+
+    def _collapse_selection(self):
+        """Back to one selected clip (the lead row) before logging it."""
+        idx = self._selected_file_idx
+        table = getattr(self, "_file_list_table", None)
+        if table is None or table.numberOfSelectedRows() <= 1 or idx < 0:
+            return
+        from AppKit import NSIndexSet
+        self._quiet_select = True
+        try:
+            table.selectRowIndexes_byExtendingSelection_(
+                NSIndexSet.indexSetWithIndex_(idx), False)
+        finally:
+            self._quiet_select = False
+        self._update_selection_ui()
+
+    def _on_multi_selected(self, lead):
+        """Several clips selected with ⇧ or ⌘: show the lead one, never arm a log."""
+        if lead >= 0 and lead != self._selected_file_idx:
+            self._on_file_selected(lead, arm=False)
+        else:
+            self._selected_file_idx = lead
+        self._update_selection_ui()
+        if getattr(self, "_quiet_select", False) or self.step is not None:
+            return
+        n = len(self._selected_log_files())
+        self._set_v2_hint(f"{n} clips selected  ·  ⌘⌫ Trash  ·  X reject  ·  ↵ log one")
+
+    def _update_selection_ui(self):
+        """Show the header trash button only when there's something to trash."""
+        btn = getattr(self, "_file_trash_btn", None)
+        if btn is None:
+            return
+        n = len(self._selected_log_files())
+        btn.setHidden_(n == 0)
+        btn.setToolTip_(f"Move {n} clips to the Trash (⌘⌫)" if n > 1
+                        else "Move this clip to the Trash (⌘⌫)")
+
+    def _file_context_menu(self):
+        from AppKit import NSMenu, NSMenuItem
+        files = self._selected_log_files()
+        if not files:
+            return None
+        n = len(files)
+        menu = NSMenu.alloc().initWithTitle_("Clips")
+        menu.setAutoenablesItems_(False)
+        tgt = MenuTarget.alloc().init()
+        tgt._callback = self._on_file_menu_pick
+        self._file_menu_targets = [tgt]     # ObjC doesn't retain menu targets
+        idle = self.step is None
+
+        def add(title, key, enabled=True):
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                title, "menuPicked:", "")
+            item.setTarget_(tgt)
+            item.setRepresentedObject_(key)
+            item.setEnabled_(enabled)
+            menu.addItem_(item)
+
+        add("Quick Look", "quicklook")
+        add("Show in Finder", "reveal")
+        menu.addItem_(NSMenuItem.separatorItem())
+        all_rejects = not reject_toggle_target([f.name for f in files], self._rejected)
+        add(("Unmark Reject" if all_rejects else "Mark as Reject") if n == 1 else
+            (f"Unmark {n} Rejects" if all_rejects else f"Mark {n} as Rejects"),
+            "reject", idle)
+        menu.addItem_(NSMenuItem.separatorItem())
+        add("Move to Trash" if n == 1 else f"Move {n} Clips to Trash", "trash", idle)
+        return menu
+
+    def _on_file_menu_pick(self, key):
+        files = self._selected_log_files()
+        if not files:
+            return
+        if key == "quicklook":
+            idx = self._selected_file_idx
+            f = self._files[idx] if 0 <= idx < len(self._files) else files[0]
+            close_quicklook()
+            quicklook(str(f))
+        elif key == "reveal":
+            from AppKit import NSWorkspace
+            from Foundation import NSURL
+            NSWorkspace.sharedWorkspace().activateFileViewerSelectingURLs_(
+                [NSURL.fileURLWithPath_(str(f)) for f in files])
+        elif key == "reject":
+            self._toggle_reject_current()
+        elif key == "trash":
+            self._trash_current_clip()
+
     def _toggle_reject_current(self):
+        files = self._selected_log_files()
+        if len(files) > 1:
+            self._toggle_reject_many([f.name for f in files])
+            return
         idx = self._selected_file_idx
         if not (0 <= idx < len(self._files)):
             return
@@ -4397,15 +4641,38 @@ class TagWindowV2:
         else:
             self._set_v2_hint("Reject removed  ·  ENTER to log this clip")
 
+    def _toggle_reject_many(self, names):
+        on = reject_toggle_target(names, self._rejected)
+        records = load_json(TAG_RECORDS_FILE, {})
+        for name in names:
+            set_reject(records, name, on)
+            if on:
+                self._rejected.add(name)
+            else:
+                self._rejected.discard(name)
+        save_tag_records(records)
+        self._file_list_table.reloadData()
+        self._refresh_naming_clips()
+        self._set_v2_hint(
+            f"✕  Marked {len(names)} clips as rejects ({len(self._rejected)} in all)"
+            if on else f"Rejects removed from {len(names)} clips")
+
     def _trash_current_clip(self):
+        """⌘⌫, the header trash button or the right-click menu: move every
+        selected clip to the Trash (confirmed, undoable with ⌘Z)."""
         if self.step is not None:
-            self._set_v2_hint("Finish this log or press ESC before moving the clip to the Trash")
+            self._set_v2_hint("Finish this log or press ESC before moving clips to the Trash")
             return
-        idx = self._selected_file_idx
-        if not self.app or not (0 <= idx < len(self._files)):
+        files = self._selected_log_files()
+        if not files and 0 <= self._selected_file_idx < len(self._files):
+            files = [self._files[self._selected_file_idx]]
+        if not self.app or not files:
             return
-        if self.app.trash_clips([self._files[idx]], self.folder):
-            self._set_v2_hint("🗑  Moved to the Trash  ·  ⌘Z to put it back")
+        moved = self.app.trash_clips(files, self.folder)
+        if moved:
+            self._set_v2_hint(
+                ("🗑  Moved to the Trash" if moved == 1 else f"🗑  Moved {moved} clips to the Trash")
+                + "  ·  ⌘Z to put back")
 
     def _naming_trash(self):
         targets = trash_targets(self._files, self._naming_selected, self._rejected)
@@ -4938,6 +5205,7 @@ class TagWindowV2:
         table.setSelectionHighlightStyle_(1)  # NSTableViewSelectionHighlightStyleRegular
         table.setAllowsColumnReordering_(False)
         table.setAllowsColumnResizing_(True)
+        table.setAllowsMultipleSelection_(True)   # ⇧-click / ⌘-click, ⇧↑↓, ⌘A
         # The name column takes up (or gives back) any width the info columns don't use
         table.setColumnAutoresizingStyle_(5)   # NSTableViewFirstColumnOnlyAutoresizingStyle
         self._file_list_header = table.headerView()   # kept so it can be shown again
@@ -4973,6 +5241,24 @@ class TagWindowV2:
         col_btn.setClickHandler_(lambda v, e: self._show_columns_menu(v))
         panel.addSubview_(col_btn)
         self._file_columns_btn = col_btn
+
+        # Trash button — left of the columns button; shown while clips are selected
+        tr_btn = PillButton.alloc().initWithFrame_(NSMakeRect(
+            FILE_LIST_W - 2 * cb_sz - 8 - 6,
+            panel_h - HEADER_STRIP_H + (HEADER_STRIP_H - cb_sz) / 2, cb_sz, cb_sz))
+        tr_btn.layer().setCornerRadius_(6.0)
+        tr_btn.setAutoresizingMask_(1 | 8)
+        tr_icon = NSImageView.alloc().initWithFrame_(NSMakeRect(3, 3, cb_sz - 6, cb_sz - 6))
+        tr_img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            "trash", "Move to Trash")
+        if tr_img:
+            tr_icon.setImage_(tr_img)
+        tr_icon.setContentTintColor_(NSColor.secondaryLabelColor())
+        tr_btn.addSubview_(tr_icon)
+        tr_btn.setClickHandler_(lambda v, e: self._trash_current_clip())
+        tr_btn.setHidden_(True)
+        panel.addSubview_(tr_btn)
+        self._file_trash_btn = tr_btn
 
         self._media_info      = {}     # media_info_key → clip_media_info dict
         self._media_info_gen  = 0      # bumped to stop a stale background pass
@@ -5349,6 +5635,7 @@ class TagWindowV2:
         prev_names = [f.name for f in self._files]
         prev_idx   = self._selected_file_idx
         prev_name  = prev_names[prev_idx] if 0 <= prev_idx < len(prev_names) else None
+        prev_multi = [f.name for f in self._selected_log_files()] if self._files else []
 
         files, inodes = self._scan_folder()
         names   = [f.name for f in files]
@@ -5377,13 +5664,19 @@ class TagWindowV2:
             self._quiet_select = True
             try:
                 table.reloadData()
-                if new_idx >= 0:
-                    table.selectRowIndexes_byExtendingSelection_(
-                        NSIndexSet.indexSetWithIndex_(new_idx), False)
+                rows = (follow_multi_selection(names, prev_multi, renames, new_idx)
+                        if len(prev_multi) > 1 else [new_idx] if new_idx >= 0 else [])
+                if rows:
+                    from AppKit import NSMutableIndexSet
+                    idxs = NSMutableIndexSet.indexSet()
+                    for r in rows:
+                        idxs.addIndex_(r)
+                    table.selectRowIndexes_byExtendingSelection_(idxs, False)
                 else:
                     table.deselectAll_(None)
             finally:
                 self._quiet_select = False
+            self._update_selection_ui()
         if hasattr(self, "_empty_state_overlay"):
             show_empty = not bool(self._files)
             self._empty_state_overlay.setHidden_(not show_empty)
@@ -5441,10 +5734,11 @@ class TagWindowV2:
     def _start_folder_watch(self):
         _watch_folder(self.folder, self._on_folder_changed)
 
-    def _on_file_selected(self, row):
+    def _on_file_selected(self, row, arm=True):
         self._selected_file_idx = row
         if getattr(self, "_quiet_select", False):
             return   # _refresh_files restoring the selection; it updates the card itself
+        self._update_selection_ui()
         if not (self._files and row < len(self._files)):
             return
         f = self._files[row]
@@ -5457,6 +5751,8 @@ class TagWindowV2:
         if hasattr(self, "_now_thumb_icon"):
             self._now_thumb_icon.setHidden_(False)
         threading.Thread(target=self._load_thumb, args=(f,), daemon=True).start()
+        if not arm:
+            return
         if self._settings.get("arm_on_file_select", False) and self.step is None:
             self._start_player_step()
         elif self.step is None:
@@ -11726,7 +12022,7 @@ class BasketballRenamerApp(rumps.App):
                     item["record_before"] = rec
                 items.append(item)
             else:
-                errors.append(f"  {p.name}: {result}")
+                errors.append(f"  {p.name}: {result.replace(NO_TRASH_PREFIX, '')}")
 
         if items:
             save_tag_records(records)
@@ -11744,6 +12040,10 @@ class BasketballRenamerApp(rumps.App):
             rumps.alert("Some Clips Weren't Moved",
                         head + f"{len(errors)} clip(s) stayed in the folder:\n"
                         + "\n".join(errors))
+        else:
+            note = recycle_bin_note(items)
+            if note:
+                rumps.alert("Moved to the Recycle Bin", note)
         self._refresh_tag_window_files()
         return len(items)
 

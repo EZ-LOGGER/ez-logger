@@ -610,6 +610,20 @@ def test_trash_targets_prefers_selection_then_rejects():
     assert renamer.trash_targets(files, set(), set()) == []
 
 
+def test_follow_multi_selection_keeps_clips_through_renames_and_removals():
+    names = ["a.mp4", "B_new.mp4", "d.mp4"]
+    # b was renamed in Finder, c was deleted; lead row stays selected
+    rows = renamer.follow_multi_selection(
+        names, ["a.mp4", "b.mp4", "c.mp4"], {"b.mp4": "B_new.mp4"}, 2)
+    assert rows == [0, 1, 2]
+    assert renamer.follow_multi_selection(names, ["gone.mp4"], {}, -1) == []
+
+
+def test_reject_toggle_target_marks_unless_all_already_rejects():
+    assert renamer.reject_toggle_target(["a", "b"], {"a"}) is True
+    assert renamer.reject_toggle_target(["a", "b"], {"a", "b"}) is False
+
+
 def test_trash_confirm_text_lists_five_then_counts_rest():
     title, body = renamer.trash_confirm_text([f"c{i}.mp4" for i in range(7)])
     assert title == "Move 7 clips to the Trash?"
@@ -640,14 +654,74 @@ def test_safe_trash_refuses_files_it_could_not_rename(tmp_path, quiet_log):
     assert called == [] and notes.exists()
 
 
-def test_safe_trash_never_deletes_when_volume_has_no_trash(tmp_path, quiet_log):
+def test_safe_trash_other_failures_never_delete(tmp_path, quiet_log):
     folder = tmp_path / "clips"; folder.mkdir()
     clip = folder / "clip.mp4"; clip.touch()
     with patch.object(renamer, "_trash_file",
-                      lambda p: (False, "", "this drive has no Trash")):
+                      lambda p: (False, "", "permission denied")):
         ok, reason = SafeRenamer.safe_trash(clip, folder)
-    assert not ok and "no Trash" in reason
+    assert not ok and "permission" in reason
     assert clip.exists()
+
+
+def _no_trash(p):
+    return False, "", renamer.NO_TRASH_PREFIX + "the volume doesn't have one"
+
+
+def _fake_share(tmp_path, bin_name="@Recycle"):
+    """A share root with a recycle bin and a clip two folders down."""
+    share = tmp_path / "share"; folder = share / "2026-2027" / "MBB"
+    folder.mkdir(parents=True)
+    if bin_name:
+        (share / bin_name).mkdir()
+    return share, folder
+
+
+def test_no_trash_goes_to_nas_recycle_bin_keeping_its_path(tmp_path, quiet_log):
+    share, folder = _fake_share(tmp_path)
+    clip = folder / "clip.mp4"; clip.write_text("x")
+    with patch.object(renamer, "_trash_file", _no_trash), \
+         patch.object(renamer, "_volume_root", lambda p: str(share)):
+        ok, path = SafeRenamer.safe_trash(clip, folder)
+    assert ok, path
+    assert Path(path) == share / "@Recycle" / "2026-2027" / "MBB" / "clip.mp4"
+    assert Path(path).read_text() == "x" and not clip.exists()
+    # and ⌘Z brings it back
+    with patch.object(renamer, "_volume_root", lambda p: str(share)):
+        ok, err = SafeRenamer.safe_restore(Path(path), folder / "clip.mp4", folder)
+    assert ok, err
+    assert clip.read_text() == "x"
+
+
+def test_no_trash_recycle_bin_never_overwrites(tmp_path, quiet_log):
+    share, folder = _fake_share(tmp_path)
+    old = share / "@Recycle" / "2026-2027" / "MBB"; old.mkdir(parents=True)
+    (old / "clip.mp4").write_text("older")
+    clip = folder / "clip.mp4"; clip.write_text("new")
+    with patch.object(renamer, "_trash_file", _no_trash), \
+         patch.object(renamer, "_volume_root", lambda p: str(share)):
+        ok, path = SafeRenamer.safe_trash(clip, folder)
+    assert ok and Path(path).name == "clip (2).mp4"
+    assert (old / "clip.mp4").read_text() == "older"
+
+
+def test_no_trash_and_no_recycle_bin_uses_folder_trash(tmp_path, quiet_log):
+    share, folder = _fake_share(tmp_path, bin_name=None)
+    clip = folder / "clip.mp4"; clip.touch()
+    with patch.object(renamer, "_trash_file", _no_trash), \
+         patch.object(renamer, "_volume_root", lambda p: str(share)):
+        ok, path = SafeRenamer.safe_trash(clip, folder)
+    assert ok and Path(path) == folder / "_Trash" / "clip.mp4"
+    assert not renamer.is_video(folder / "_Trash")      # the folder isn't listed as a clip
+    ok, err = SafeRenamer.safe_restore(Path(path), folder / "clip.mp4", folder)
+    assert ok, err
+
+
+def test_recycle_bin_note():
+    assert renamer.recycle_bin_note([{"trash_path": "/Users/a/.Trash/c.mp4"}]) == ""
+    note = renamer.recycle_bin_note([{"trash_path": "/Volumes/N/@Recycle/x/c.mp4"}])
+    assert "NAS recycle bin (@Recycle)" in note and "⌘Z" in note
+    assert "_Trash folder" in renamer.recycle_bin_note([{"trash_path": "/v/clips/_Trash/c.mp4"}])
 
 
 def test_safe_restore_round_trip(tmp_path, quiet_log):
