@@ -1629,6 +1629,23 @@ def roster_to_shortcuts(entries):
         shortcuts.append({"key": key, "label": label, "number": number})
     return shortcuts
 
+def players_for_sport(saved_players, cached_roster):
+    """Players to use when switching to a sport. The saved list wins, so the user's
+    own edits survive; the scraped roster only fills a sport that has none yet."""
+    return list(saved_players) if saved_players else list(cached_roster or [])
+
+
+def edit_player_shortcut(items, idx, key, label):
+    """Return a new players list with item idx's key and label changed, keeping its
+    other fields (jersey number, Finder color), sorted by key as the Team tab shows it."""
+    items = [dict(sc) for sc in items]
+    if 0 <= idx < len(items):
+        items[idx].update({"key": key, "label": label})
+    items.sort(key=lambda sc: (0, int(sc["key"])) if sc.get("key", "").isdigit()
+               else (1, sc.get("key", "").lower()))
+    return items
+
+
 def tag_base_stem(stem, record):
     """Return the name to build labels onto, dropping labels from an earlier tag.
     Uses the base saved when the clip was tagged; a clip with no saved base keeps its name."""
@@ -6590,9 +6607,8 @@ class TagWindowV2:
             label = _asc(name_field.stringValue().strip()).upper()
             if key and label:
                 items = self.shortcuts.setdefault("players", [])
-                items.append({"key": key, "label": label})
-                self.app._save_shortcuts()
-                self._refresh_players_grid()
+                items.append({"key": key, "label": label, "number": ""})
+                self._players_changed()
 
     def _players_edit(self, idx):
         from AppKit import NSAlert, NSTextField, NSView, NSMakeRect, NSFont
@@ -6622,11 +6638,8 @@ class TagWindowV2:
             key   = key_field.stringValue().strip()[:1]
             label = _asc(name_field.stringValue().strip()).upper()
             if key and label:
-                items[idx] = {"key": key, "label": label}
-                items.sort(key=lambda sc: (0, int(sc["key"])) if sc.get("key", "").isdigit() else (1, sc.get("key", "").lower()))
-                self.shortcuts["players"] = items
-                self.app._save_shortcuts()
-                self._refresh_players_grid()
+                self.shortcuts["players"] = edit_player_shortcut(items, idx, key, label)
+                self._players_changed()
 
     def _players_delete(self, idx):
         from AppKit import NSAlert
@@ -6644,8 +6657,16 @@ class TagWindowV2:
         if alert.runModal() == 1000:
             items.pop(idx)
             self.shortcuts["players"] = items
-            self.app._save_shortcuts()
-            self._refresh_players_grid()
+            self._players_changed()
+
+    def _players_changed(self):
+        """Save the player list and redraw everywhere it shows: the Team grid,
+        the Log Mode player buttons and the sport pill's player count."""
+        self.app._save_shortcuts()
+        self._refresh_players_grid()
+        if hasattr(self, "_sc_scrollviews"):
+            self._populate_shortcut_pills("players")
+        self._update_sport_pill()
 
     def _players_load_roster(self):
         if not self.app:
@@ -11146,10 +11167,10 @@ class BasketballRenamerApp(rumps.App):
         # Load this sport's shortcuts (all banks), falling back to defaults
         new_sc = dict(self._shortcuts_data.get(sport_key) or default_shortcuts(sport_key))
 
-        # Overlay the cached roster for the new sport's players bank
+        # The saved players win so the user's label edits survive a switch; the
+        # cached roster only fills a sport that has no players yet
         cache = load_json(ROSTERS_FILE, {})
-        if sport_key in cache and cache[sport_key]:
-            new_sc["players"] = cache[sport_key]
+        new_sc["players"] = players_for_sport(new_sc.get("players"), cache.get(sport_key))
 
         # Swap in-place so the window's reference stays valid
         self.shortcuts.clear()
@@ -11159,7 +11180,7 @@ class BasketballRenamerApp(rumps.App):
 
         self._refresh_tag_window_shortcuts()
         _s = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
-        if _s.get("auto_fetch_roster", False) or not (sport_key in cache and cache[sport_key]):
+        if _s.get("auto_fetch_roster", False) or not new_sc["players"]:
             _cd = _s.get("roster_cache_days", 7)
             threading.Thread(target=self._load_roster_bg, args=(sport_key, True, _cd), daemon=True).start()
 
@@ -11202,9 +11223,14 @@ class BasketballRenamerApp(rumps.App):
         meta.update({code: now_iso for code in cache})
         save_json(ROSTERS_META_FILE, meta)
         sport_key = self.session.get("sport", "MBB")
-        if sport_key in cache:
-            self.shortcuts["players"] = cache[sport_key]
-            self._save_shortcuts()
+        # A fetch the user asked for replaces each fetched sport's players. The other
+        # sports get theirs here too, since switching sports keeps saved players.
+        for code, players in cache.items():
+            if code == sport_key:
+                self.shortcuts["players"] = players
+            else:
+                self._shortcuts_data.setdefault(code, default_shortcuts(code))["players"] = players
+        self._save_shortcuts()
         self._refresh_tag_window_players()
         self._notify_tag_window_scrape_done(True, results)
 

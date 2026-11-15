@@ -1167,3 +1167,24 @@ def test_step_circle_scale_limited_by_width_and_steps():
 ])
 def test_is_newer_version(latest, current, newer):
     assert renamer.is_newer_version(latest, current) is newer
+
+
+# ── Player edits survive ─────────────────────────────────────────────────────
+
+def test_players_for_sport_prefers_saved_players():
+    saved  = [{"key": "1", "label": "J.SMITH", "number": "4"}]
+    cached = [{"key": "1", "label": "SMITH", "number": "4"}]
+    assert renamer.players_for_sport(saved, cached) == saved
+    assert renamer.players_for_sport([], cached) == cached
+    assert renamer.players_for_sport(None, None) == []
+
+
+def test_edit_player_keeps_number_and_color_and_sorts():
+    items = [{"key": "2", "label": "JONES", "number": "11"},
+             {"key": "1", "label": "SMITH", "number": "4", "finder_color": "red"}]
+    out = renamer.edit_player_shortcut(items, 1, "3", "J.SMITH")
+    assert out == [{"key": "2", "label": "JONES", "number": "11"},
+                   {"key": "3", "label": "J.SMITH", "number": "4", "finder_color": "red"}]
+    assert items[1]["label"] == "SMITH"          # original list untouched
+    assert renamer.edit_player_shortcut(items, 9, "x", "Y") == sorted(
+        items, key=lambda sc: int(sc["key"]))   # bad index changes nothing
