@@ -5,6 +5,15 @@
         <description>EZ Logger update feed</description>
         <language>en</language>
         <item>
+            <title>1.0.11</title>
+            <pubDate>Mon, 16 Nov 2026 10:59:57 -0500</pubDate>
+            <sparkle:version>1.0.11</sparkle:version>
+            <sparkle:shortVersionString>1.0.11</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/EZ-LOGGER/ez-logger/releases/download/v1.0.11/EZLogger-1.0.11.dmg" length="15647944" type="application/octet-stream" sparkle:edSignature="/lRXZV8C8JqR52cer+tRksq5JneMrshdcCdD4YrSYcSI+TpsX86X8Sw6HT+aTC56kRenvTItgfPxsmEwIjY5BA=="/>
+        </item>
+        <item>
             <title>1.0.10</title>
             <pubDate>Mon, 16 Nov 2026 10:49:38 -0500</pubDate>
             <sparkle:version>1.0.10</sparkle:version>
@@ -21,15 +30,6 @@
             <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <enclosure url="https://github.com/EZ-LOGGER/ez-logger/releases/download/v1.0.9/EZLogger-1.0.9.dmg" length="15647328" type="application/octet-stream" sparkle:edSignature="A1WKotBj+TX5NAC9bA9v1EJZdvMq2gXa0kuC2xz+dpolYCHoUJrU+PcZHQPtBKRZOiv5WGPmjaf3feQtZOdLDQ=="/>
-        </item>
-        <item>
-            <title>1.0.8</title>
-            <pubDate>Sun, 15 Nov 2026 15:52:26 -0500</pubDate>
-            <sparkle:version>1.0.8</sparkle:version>
-            <sparkle:shortVersionString>1.0.8</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/EZ-LOGGER/ez-logger/releases/download/v1.0.8/EZLogger-1.0.8.dmg" length="15647535" type="application/octet-stream" sparkle:edSignature="iajj673CWsRF0vNF0apDEIsMA7KXHb5t8gqoaookF2ghNLhKVNX84CcLosgr8BV8Mc1hAXwMbID7v7PN6lxECA=="/>
         </item>
     </channel>
 </rss>

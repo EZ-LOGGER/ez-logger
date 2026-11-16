@@ -1262,3 +1262,16 @@ def test_edit_player_keeps_number_and_color_and_sorts():
     assert items[1]["label"] == "SMITH"          # original list untouched
     assert renamer.edit_player_shortcut(items, 9, "x", "Y") == sorted(
         items, key=lambda sc: int(sc["key"]))   # bad index changes nothing
+
+
+def test_remove_legacy_launch_agent_deletes_old_login_item(tmp_path):
+    agent = tmp_path / "com.bball.renamer.plist"
+    agent.write_text("<plist/>")
+    with patch.object(renamer, "LEGACY_LAUNCH_AGENT", str(agent)):
+        renamer._remove_legacy_launch_agent()
+        assert not agent.exists()
+        renamer._remove_legacy_launch_agent()   # nothing there: no error
+
+
+def test_launch_at_login_setting_is_gone():
+    assert "launch_at_login" not in renamer.DEFAULT_SETTINGS

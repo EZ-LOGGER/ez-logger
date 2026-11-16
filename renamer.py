@@ -23,7 +23,7 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from datetime import datetime
 
-APP_VERSION = "1.0.10"
+APP_VERSION = "1.0.11"
 
 CRASH_LOG_DIR  = os.path.expanduser("~/.ezlogger/crashes")
 CRASH_EMAIL_TO = "zachjkeding@gmail.com"
@@ -184,7 +184,6 @@ DEFAULT_SETTINGS = {
     "roster_cache_days":       7,
     # System
     "show_in_dock":            True,
-    "launch_at_login":         False,
     "auto_open_on_launch":     True,
     "sound_on_rename":         False,
     # Undo
@@ -651,31 +650,17 @@ def _save_setting(key, value):
     s[key] = value
     save_json(SETTINGS_FILE, s)
 
-def _set_launch_at_login(on):
-    """Write or remove a LaunchAgent plist so EZ Logger starts at login."""
-    import plistlib
-    plist_path = os.path.expanduser("~/Library/LaunchAgents/com.bball.renamer.plist")
-    if on:
-        app_bundle = os.path.abspath(
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
-        binary = os.path.join(app_bundle, "Contents/MacOS/EZ Logger")
-        if os.path.exists(binary):
-            plist = {
-                "Label": "com.bball.renamer",
-                "ProgramArguments": [binary],
-                "RunAtLoad": True,
-            }
-            try:
-                with open(plist_path, "wb") as f:
-                    plistlib.dump(plist, f)
-            except Exception:
-                pass
-    else:
-        try:
-            if os.path.exists(plist_path):
-                os.remove(plist_path)
-        except Exception:
-            pass
+LEGACY_LAUNCH_AGENT = os.path.expanduser("~/Library/LaunchAgents/com.bball.renamer.plist")
+
+def _remove_legacy_launch_agent():
+    """Delete the login item the old "Launch at login" setting wrote. The setting is
+    gone, so a leftover agent could no longer be switched off from the app. Users
+    can still add EZ Logger under System Settings → General → Login Items."""
+    try:
+        if os.path.isfile(LEGACY_LAUNCH_AGENT):
+            os.remove(LEGACY_LAUNCH_AGENT)
+    except Exception:
+        pass
 
 def file_timestamps(path: Path):
     try:
@@ -10689,9 +10674,6 @@ class TagWindowV2:
         make_toggle("show_in_dock",
                     "Show in Dock",
                     "Show EZ Logger in the Dock. Turn off for menubar-only mode.")
-        make_toggle("launch_at_login",
-                    "Launch at login",
-                    "Start EZ Logger automatically at login (requires built .app).")
         make_toggle("auto_open_on_launch",
                     "Open window at launch",
                     "Automatically open the main window when the app starts.")
@@ -10837,8 +10819,6 @@ class TagWindowV2:
             return self._toggle_show_jersey_numbers
         if key == "show_in_dock":
             return self._toggle_setting_dock
-        if key == "launch_at_login":
-            return self._toggle_setting_login
         return lambda: self._toggle_setting_bool(key)
 
     def _toggle_setting_bool(self, key):
@@ -10883,10 +10863,6 @@ class TagWindowV2:
             NSApplication.sharedApplication().setActivationPolicy_(0 if val else 1)
         except Exception:
             pass
-
-    def _toggle_setting_login(self):
-        self._toggle_setting_bool("launch_at_login")
-        _set_launch_at_login(self._settings.get("launch_at_login", False))
 
     # ── Help section ──────────────────────────────────────────────────────────
 
@@ -11338,6 +11314,7 @@ class BasketballRenamerApp(rumps.App):
         self._shortcuts_data[sport] = self.shortcuts
         self._session_start_ts = datetime.now().isoformat()
         self._build_menu()
+        _remove_legacy_launch_agent()
         # Apply dock visibility preference at startup
         _s = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
         if not _s.get("show_in_dock", True):

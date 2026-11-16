@@ -88,7 +88,7 @@ All paths are in `~`; constants are at the top of `renamer.py`.
 | `.ezlogger/rename_log.json` | Permanent log of every rename attempt |
 | `.ezlogger/tag_records.json` | `{tagged_filename: {"base", "colors", "reject"}}`, so relabeling replaces old labels; `reject` marks clips to trash |
 | `.ezlogger/crashes/` | Crash logs |
-| `Library/LaunchAgents/com.bball.renamer.plist` | Login item, written by `_set_launch_at_login`; only works from a built `.app` |
+| `Library/LaunchAgents/com.bball.renamer.plist` | Legacy login item from the removed "Launch at login" setting; `_remove_legacy_launch_agent` deletes it at launch |
 
 ## Structure
 
