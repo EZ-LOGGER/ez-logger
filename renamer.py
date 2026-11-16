@@ -23,7 +23,7 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from datetime import datetime
 
-APP_VERSION = "1.0.12"
+APP_VERSION = "1.0.13"
 
 CRASH_LOG_DIR  = os.path.expanduser("~/.ezlogger/crashes")
 CRASH_EMAIL_TO = "zachjkeding@gmail.com"
@@ -3175,6 +3175,9 @@ def make_objc_classes():
             # A drive or NAS share may have been mounted or ejected meanwhile
             if self.owner and hasattr(self.owner, "_refresh_folder_roots"):
                 self.owner._refresh_folder_roots()
+            # Folders copied in or removed in Finder (a new game, a new card)
+            if self.owner and hasattr(self.owner, "_refresh_folder_tree_async"):
+                self.owner._refresh_folder_tree_async()
 
     WindowDelegate = _WindowDelegate
 
@@ -3398,9 +3401,16 @@ def make_objc_classes():
                 self._card.removeFromSuperview()
 
             CARD_W  = 340.0
-            CARD_H  = 190.0
             PAD     = 20.0
             bounds  = self.bounds()
+
+            # Body: measured first so the card grows to fit every line
+            body_lbl = NSTextField.wrappingLabelWithString_(body)
+            body_lbl.setFont_(NSFont.systemFontOfSize_(13))
+            body_lbl.setTextColor_(NSColor.secondaryLabelColor())
+            body_h = max(52.0, float(body_lbl.cell().cellSizeForBounds_(
+                NSMakeRect(0, 0, CARD_W - PAD * 2, 10000)).height) + 2)
+            CARD_H  = 190.0 + (body_h - 52.0)
 
             # Position card below spotlight (or above if near bottom)
             if rect is not None:
@@ -3448,10 +3458,7 @@ def make_objc_classes():
             card.addSubview_(title_lbl)
 
             # Body
-            body_lbl = NSTextField.wrappingLabelWithString_(body)
-            body_lbl.setFont_(NSFont.systemFontOfSize_(13))
-            body_lbl.setTextColor_(NSColor.secondaryLabelColor())
-            body_lbl.setFrame_(NSMakeRect(PAD, dot_y - 8 - 20 - 52, CARD_W - PAD * 2, 52))
+            body_lbl.setFrame_(NSMakeRect(PAD, dot_y - 8 - 20 - body_h, CARD_W - PAD * 2, body_h))
             card.addSubview_(body_lbl)
 
             # Buttons
@@ -3543,7 +3550,16 @@ class TagWindowV2:
         self._folder_children    = {}      # {folder key: [Path]} subfolders, loaded off the main thread
         self._folder_counts      = {}      # {folder key: clip count}
         self._folder_loading     = set()
+        self._fav_offline        = {}      # {favorite key: True when unreachable}, checked off the main thread
+        self._tree_refresh_busy  = False
+        self._tree_refresh_at    = 0.0
         self._folder_roots       = []
+        # Clip-list scans from Finder changes run off the main thread. _files_gen
+        # counts every list the main thread applies, so a background scan that
+        # started before one of the app's own renames is thrown away, not applied.
+        self._files_gen          = 0
+        self._scan_busy          = False
+        self._scan_again         = False
         self._folder_menu_targets = []     # MenuTargets for open path-bar / tree menus
         self._search_mode        = False
         self._search_text        = ""
@@ -5903,15 +5919,17 @@ class TagWindowV2:
         self._empty_state_overlay = ov
         self._empty_state_msg     = msg
 
-    def _scan_folder(self):
+    def _scan_folder(self, folder=None):
         """Return (sorted video files, {name: inode}); empty if the folder is gone.
-        A file that vanishes mid-scan is skipped."""
-        if not (self.folder and self.folder.is_dir()):
+        A file that vanishes mid-scan is skipped. Safe to call off the main thread
+        with an explicit folder."""
+        folder = self.folder if folder is None else folder
+        if not (folder and folder.is_dir()):
             return [], {}
         sort = self._settings.get("file_sort_order", "name_asc")
         entries = []
         try:
-            listing = list(self.folder.iterdir())
+            listing = list(folder.iterdir())
         except OSError:
             return [], {}
         for f in listing:
@@ -5927,32 +5945,39 @@ class TagWindowV2:
         entries = sort_file_entries(entries, sort, info_for)
         return [f for f, _ in entries], {f.name: st.st_ino for f, st in entries}
 
-    def _refresh_files(self, external=False):
+    def _refresh_files(self, external=False, scanned=None):
         """Reload the clip lists from disk. The selection stays on the same clip,
         following it through a rename. With external=True (a Finder change or the
         window regaining focus), nothing redraws unless the clip names changed.
-        Returns True when the lists were rebuilt."""
+        `scanned` is (files, inodes, folder_missing) from a background scan, so the
+        main thread does no disk access. Returns True when the lists were rebuilt."""
         prev_names = [f.name for f in self._files]
         prev_idx   = self._selected_file_idx
         prev_name  = prev_names[prev_idx] if 0 <= prev_idx < len(prev_names) else None
         prev_multi = [f.name for f in self._selected_log_files()] if self._files else []
 
-        files, inodes = self._scan_folder()
+        if scanned is None:
+            files, inodes = self._scan_folder()
+            folder_missing = bool(self.folder) and not self.folder.is_dir()
+        else:
+            files, inodes, folder_missing = scanned
+        self._files_gen += 1
         names   = [f.name for f in files]
         renames = match_renames(self._file_inodes, inodes) if self._file_inodes else {}
         self._file_inodes = inodes
 
-        records = load_tag_records(self.folder)
         if renames:
+            # Only read the records file when a clip actually moved
+            records = load_tag_records(self.folder)
             if move_records_for_renames(records, renames):
                 save_tag_records(records, self.folder)
             self._naming_selected = {renames.get(n, n) for n in self._naming_selected}
 
-        folder_missing = bool(self.folder) and not self.folder.is_dir()
         if (external and names == prev_names and not renames
                 and folder_missing == self._folder_missing):
             return False
         self._folder_missing = folder_missing
+        self._note_current_folder_count(0 if folder_missing else len(files))
 
         self._files    = files
         new_idx = pick_selection(names, prev_name, renames, prev_idx)
@@ -6010,7 +6035,9 @@ class TagWindowV2:
             # Same clip under a new name: keep any log in progress going
             if hasattr(self, "_now_filename"):
                 self._now_filename.setStringValue_(now_name)
-            self._thumb_for_path = str(self._files[new_idx])
+            new_path = self._files[new_idx]
+            self._thumb_cache_rename(new_path.parent / prev_name, new_path)
+            self._thumb_for_path = str(new_path)
             return
         cancelled = self.step is not None
         if cancelled:
@@ -6031,10 +6058,49 @@ class TagWindowV2:
                          "Nothing was renamed."))
 
     def _on_folder_changed(self):
-        """FSEvents or window focus: pick up changes made outside the app."""
+        """FSEvents or window focus: pick up changes made outside the app. The
+        folder is read off the main thread, so a slow or dropped NAS share never
+        freezes the window."""
         if getattr(self, "_quiet_select", False):
             return
-        self._refresh_files(external=True)
+        self._scan_folder_async()
+        if self.folder:
+            # Folders made or removed inside this one show up in the tree
+            self._refresh_folder_tree_async([folder_key(self.folder)])
+
+    def _scan_folder_async(self):
+        if self._scan_busy:
+            self._scan_again = True     # rescan once the running pass lands
+            return
+        folder = self.folder
+        if not folder:
+            return
+        self._scan_busy = True
+        gen = self._files_gen
+
+        def work():
+            try:
+                files, inodes = self._scan_folder(folder)
+                missing = not folder.is_dir()
+            except Exception:
+                files, inodes, missing = None, None, None
+
+            def done():
+                self._scan_busy = False
+                again, self._scan_again = self._scan_again, False
+                if (files is not None and gen == self._files_gen
+                        and folder_key(folder) == folder_key(self.folder)
+                        and not getattr(self, "_quiet_select", False)):
+                    self._refresh_files(external=True, scanned=(files, inodes, missing))
+                elif files is not None and gen != self._files_gen:
+                    again = True        # the app changed the list meanwhile; look again
+                if again:
+                    self._scan_folder_async()
+            caller = MainCaller.alloc().init()
+            caller._cb = done
+            caller.performSelectorOnMainThread_withObject_waitUntilDone_("fire:", None, False)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _start_folder_watch(self):
         _watch_folder(self.folder, self._on_folder_changed)
@@ -6055,7 +6121,7 @@ class TagWindowV2:
             self._now_thumb_img.setHidden_(True)
         if hasattr(self, "_now_thumb_icon"):
             self._now_thumb_icon.setHidden_(False)
-        threading.Thread(target=self._load_thumb, args=(f,), daemon=True).start()
+        self._request_thumb(f)
         if not arm:
             return
         if self._settings.get("arm_on_file_select", False) and self.step is None:
@@ -6063,15 +6129,74 @@ class TagWindowV2:
         elif self.step is None:
             self._set_v2_hint("↵  ENTER to log this file  ·  SPACE to preview  ·  TAB for next")
 
-    def _load_thumb(self, path):
-        # Generate CGImage in background, encode to JPEG bytes via ImageIO
-        # (thread-safe, no AppKit, no color-space issues), then create NSImage
-        # from bytes on main thread.  Every NSImage/CGImage API that accepts a
-        # CGImageRef directly crashes on macOS 26 with HDR/wide-gamut sources.
+    _THUMB_CACHE_MAX = 200
+
+    def _request_thumb(self, path):
+        """Show the clip's frame: from the cache at once, or from one background
+        worker that grabs a frame at a time. Holding TAB or an arrow key through a
+        long list only grabs the clip it lands on, not every clip it passes."""
+        key = str(path)
+        if not hasattr(self, "_thumb_cache"):
+            from collections import OrderedDict
+            self._thumb_cache  = OrderedDict()     # {path: JPEG bytes}, newest last
+            self._thumb_lock   = threading.Lock()
+            self._thumb_want   = None
+            self._thumb_worker = False
+        with self._thumb_lock:
+            data = self._thumb_cache.get(key)
+            if data is not None:
+                self._thumb_cache.move_to_end(key)
+            else:
+                self._thumb_want = key
+                if self._thumb_worker:
+                    return            # the running worker picks up the newest request
+                self._thumb_worker = True
+        if data is not None:
+            self._render_thumb_from_data(data, key)
+            return
+        threading.Thread(target=self._thumb_worker_loop, daemon=True).start()
+
+    def _thumb_cache_rename(self, old, new):
+        """A clip renamed by the app keeps its cached frame."""
+        if not hasattr(self, "_thumb_cache"):
+            return
+        with self._thumb_lock:
+            data = self._thumb_cache.pop(str(old), None)
+            if data is not None:
+                self._thumb_cache[str(new)] = data
+
+    def _thumb_worker_loop(self):
+        while True:
+            with self._thumb_lock:
+                key, self._thumb_want = self._thumb_want, None
+                if key is None:
+                    self._thumb_worker = False
+                    return
+            if getattr(self, "_thumb_for_path", None) != key:
+                continue              # moved on before we got to it
+            data = self._thumb_bytes(key)
+            if not data:
+                continue
+            with self._thumb_lock:
+                self._thumb_cache[key] = data
+                self._thumb_cache.move_to_end(key)
+                while len(self._thumb_cache) > self._THUMB_CACHE_MAX:
+                    self._thumb_cache.popitem(last=False)
+            caller = MainCaller.alloc().init()
+            caller._cb = lambda d=data, k=key: self._render_thumb_from_data(d, k)
+            caller.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "fire:", None, False)
+
+    @staticmethod
+    def _thumb_bytes(path):
+        """A frame near 1 s as JPEG bytes, or None. Background thread only.
+        The CGImage is encoded with ImageIO (thread-safe, no AppKit, any color
+        space) and turned into an NSImage from bytes on the main thread: every
+        NSImage/CGImage API that takes a CGImageRef directly crashes on macOS 26
+        with HDR/wide-gamut sources."""
         try:
             import AVFoundation, CoreMedia
             from Foundation import NSURL, NSMutableData
-            import threading as _threading
             url   = NSURL.fileURLWithPath_(str(path))
             asset = AVFoundation.AVURLAsset.URLAssetWithURL_options_(url, None)
             gen   = AVFoundation.AVAssetImageGenerator.assetImageGeneratorWithAsset_(asset)
@@ -6079,7 +6204,7 @@ class TagWindowV2:
             gen.setRequestedTimeToleranceBefore_(CoreMedia.CMTimeMakeWithSeconds(2.0, 600))
             gen.setRequestedTimeToleranceAfter_(CoreMedia.CMTimeMakeWithSeconds(2.0, 600))
             req_time = CoreMedia.CMTimeMakeWithSeconds(1.0, 600)
-            done     = _threading.Event()
+            done     = threading.Event()
             result_box = [None]
 
             def _handler(cgimg, actual_time, error):
@@ -6087,13 +6212,11 @@ class TagWindowV2:
                 done.set()
 
             gen.generateCGImageAsynchronouslyForTime_completionHandler_(req_time, _handler)
-            done.wait(timeout=10.0)
-
+            if not done.wait(timeout=10.0):
+                gen.cancelAllCGImageGeneration()
             cgimg = result_box[0]
-            if not cgimg or getattr(self, "_thumb_for_path", None) != str(path):
-                return
-
-            # Encode CGImage → JPEG bytes using ImageIO (handles any color space)
+            if not cgimg:
+                return None
             try:
                 from Quartz import (CGImageDestinationCreateWithData,
                                     CGImageDestinationAddImage,
@@ -6105,20 +6228,21 @@ class TagWindowV2:
             data = NSMutableData.data()
             dest = CGImageDestinationCreateWithData(data, "public.jpeg", 1, None)
             if not dest:
-                return
+                return None
             CGImageDestinationAddImage(dest, cgimg, None)
             if CGImageDestinationFinalize(dest) and len(data) > 0:
-                caller = MainCaller.alloc().init()
-                caller._cb = lambda d=data: self._render_thumb_from_data(d)
-                caller.performSelectorOnMainThread_withObject_waitUntilDone_(
-                    "fire:", None, False)
+                return bytes(data)
         except Exception:
             pass
+        return None
 
-    def _render_thumb_from_data(self, data):
+    def _render_thumb_from_data(self, data, key=None):
+        if key is not None and getattr(self, "_thumb_for_path", None) != key:
+            return        # a newer clip is selected
         try:
             from AppKit import NSImage
-            img = NSImage.alloc().initWithData_(data)
+            from Foundation import NSData
+            img = NSImage.alloc().initWithData_(NSData.dataWithBytes_length_(data, len(data)))
             if img:
                 self._set_thumb_image(img)
         except Exception:
@@ -6323,7 +6447,7 @@ class TagWindowV2:
                 (container_w - m1sz.width) / 2, mid + 6, m1sz.width, m1sz.height))
             container.addSubview_(msg1)
 
-            msg2 = NSTextField.labelWithString_("Team tab → Fetch Rosters or + Add Player")
+            msg2 = NSTextField.labelWithString_("Team tab → Fetch All Rosters or + Add Player")
             msg2.setFont_(NSFont.systemFontOfSize_(10))
             msg2.setTextColor_(NSColor.secondaryLabelColor())
             msg2.setAlignment_(ALIGN_CENTER)
@@ -9286,10 +9410,12 @@ class TagWindowV2:
             return
 
         def work():
-            counts = {k: count_clips(k) for k in keys if os.path.isdir(k)}
+            offline = {k: not os.path.isdir(k) for k in keys}
+            counts  = {k: count_clips(k) for k in keys if not offline[k]}
 
             def done():
                 self._folder_counts.update(counts)
+                self._fav_offline.update(offline)
                 self._rebuild_folder_tree()
             caller = MainCaller.alloc().init()
             caller._cb = done
@@ -9297,15 +9423,90 @@ class TagWindowV2:
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _note_current_folder_count(self, n):
+        """The clip list already counted this folder; show that in the tree for free."""
+        key = folder_key(self.folder) if self.folder else ""
+        if key and self._folder_counts.get(key) != n:
+            self._folder_counts[key] = n
+            if hasattr(self, "_folders_doc"):
+                self._rebuild_folder_tree()
+
+    def _refresh_folder_tree_async(self, keys=None):
+        """Re-list folders the tree has already loaded, off the main thread, so
+        folders added, renamed or removed in Finder show up. With no keys (the
+        window coming back to the front) every open folder and favorite is checked,
+        at most every couple of seconds. Redraws only when something changed."""
+        import time
+        if not hasattr(self, "_folders_doc"):
+            return
+        full = keys is None
+        if full:
+            now = time.monotonic()
+            if self._tree_refresh_busy or now - self._tree_refresh_at < 2.0:
+                return
+            self._tree_refresh_at = now
+            keys = [k for k in self._folder_expanded if k in self._folder_children]
+            favs = [folder_key(f) for f in self._settings.get("favorite_folders") or []]
+        else:
+            keys = [k for k in keys if k in self._folder_children]
+            favs = []
+        keys = [k for k in keys if k not in self._folder_loading]
+        if not keys and not favs:
+            return
+        if full:
+            self._tree_refresh_busy = True
+        known = set(self._folder_counts)
+
+        def work():
+            kids_by, counts, offline = {}, {}, {}
+            try:
+                for k in keys:
+                    kids_by[k] = list_subfolders(k)
+                    for c in kids_by[k]:
+                        ck = folder_key(c)
+                        if full or ck not in known:     # FSEvents: only new folders
+                            counts[ck] = count_clips(c)
+                for f in favs:
+                    offline[f] = not os.path.isdir(f)
+                    if not offline[f]:
+                        counts[f] = count_clips(f)
+            except Exception:
+                pass
+
+            def done():
+                if full:
+                    self._tree_refresh_busy = False
+                changed = False
+                for k, kids in kids_by.items():
+                    if self._folder_children.get(k) != kids:
+                        self._folder_children[k] = kids
+                        changed = True
+                for k, n in counts.items():
+                    if self._folder_counts.get(k) != n:
+                        self._folder_counts[k] = n
+                        changed = True
+                for k, off in offline.items():
+                    if self._fav_offline.get(k, False) != off:
+                        self._fav_offline[k] = off
+                        changed = True
+                if changed:
+                    self._rebuild_folder_tree()
+            caller = MainCaller.alloc().init()
+            caller._cb = done
+            caller.performSelectorOnMainThread_withObject_waitUntilDone_("fire:", None, False)
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _folder_tree_rows(self):
-        """The rows the Folders panel shows, top to bottom."""
+        """The rows the Folders panel shows, top to bottom. Nothing here touches
+        the disk: a dropped NAS share could hang the window for many seconds."""
         rows = [{"kind": "header", "label": "FAVORITES"}]
         favs = self._settings.get("favorite_folders") or []
         for f in favs:
             p = Path(f)
             rows.append({"kind": "fav", "path": p, "label": p.name or str(p), "depth": 0,
                          "symbol": "star.fill", "expandable": False,
-                         "offline": not os.path.isdir(f)})
+                         "offline": self._fav_offline.get(folder_key(f), False)})
         if not favs:
             rows.append({"kind": "hint", "label": "Drag folders here, or ☆ a folder"})
         rows.append({"kind": "header", "label": "FOLDERS"})
@@ -11561,15 +11762,22 @@ class TagWindowV2:
         },
         {
             "tab":     "players",
+            "title":   "Pick your sport",
+            "body":    "Click here to choose the sport you shoot. Each sport keeps its own roster and labels. Your sport isn't listed? Choose Add Sport in the same menu.",
+            "ref":     "_sport_pill",
+            "pad":     8,
+        },
+        {
+            "tab":     "players",
             "title":   "Add your team roster",
-            "body":    "Paste your school's athletics roster URL and tap Fetch, or add players manually with + Add Player.",
+            "body":    "Paste your school's athletics roster URL and click Fetch All Rosters, or add players one at a time with + Add Player.",
             "ref":     "_tutorial_url_btn",
             "pad":     12,
         },
         {
             "tab":     "tag",
             "title":   "You're all set",
-            "body":    "Head to Log Mode to start tagging clips. Select a file, pick a player, then press Enter to log it.",
+            "body":    "In Log Mode, select a clip and press Enter to start. Pick a player, press Enter for each step, and the clip is renamed after the last one. Change the steps in the Labels tab.",
             "ref":     None,
             "pad":     0,
         },
@@ -11605,16 +11813,30 @@ class TagWindowV2:
         if (ref_name and hasattr(self, ref_name)
                 and not getattr(self, ref_name).isHiddenOrHasHiddenAncestor()):
             view = getattr(self, ref_name)
-            # Convert view bounds to window content-view coords
-            vb = view.bounds()
-            origin = view.convertPoint_toView_((vb.origin.x, vb.origin.y), None)
-            # None means convert to window base coords; content view IS the base
+            # Convert the whole rect, not just its origin: scroll views are flipped,
+            # so their (0, 0) is the top-left corner and an origin-only conversion
+            # puts the spotlight a full view-height too high.
+            r = view.convertRect_toView_(view.bounds(), None)
+            doc = view.documentView() if hasattr(view, "documentView") else None
+            if doc is not None and doc.subviews():
+                # A scroll view: hug what's in it, not the empty space below
+                from AppKit import NSUnionRect, NSIntersectionRect
+                used = None
+                for sub in doc.subviews():
+                    if sub.isHidden():
+                        continue
+                    sr = sub.convertRect_toView_(sub.bounds(), None)
+                    used = sr if used is None else NSUnionRect(used, sr)
+                if used is not None:
+                    fit = NSIntersectionRect(used, r)
+                    if fit.size.width > 0 and fit.size.height > 0:
+                        r = fit
             pad = step["pad"]
             spotlight = NSMakeRect(
-                origin.x - pad,
-                origin.y - pad,
-                vb.size.width + pad * 2,
-                vb.size.height + pad * 2,
+                r.origin.x - pad,
+                r.origin.y - pad,
+                r.size.width + pad * 2,
+                r.size.height + pad * 2,
             )
 
         self._tutorial_overlay.setSpotlightRect_cardTitle_body_step_total_onNext_onSkip_(

@@ -5,6 +5,15 @@
         <description>EZ Logger update feed</description>
         <language>en</language>
         <item>
+            <title>1.0.13</title>
+            <pubDate>Mon, 16 Nov 2026 15:22:41 -0500</pubDate>
+            <sparkle:version>1.0.13</sparkle:version>
+            <sparkle:shortVersionString>1.0.13</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/EZ-LOGGER/ez-logger/releases/download/v1.0.13/EZLogger-1.0.13.dmg" length="15670803" type="application/octet-stream" sparkle:edSignature="kjQsMGIMqJyEz8cAygB886jFRWLQXEcL4kLqyve+gvKZXTH8FxVAegkTqy1dkJ2Ir4edhPaur7EucZQQMHu1CQ=="/>
+        </item>
+        <item>
             <title>1.0.12</title>
             <pubDate>Mon, 16 Nov 2026 14:54:51 -0500</pubDate>
             <sparkle:version>1.0.12</sparkle:version>
@@ -21,15 +30,6 @@
             <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <enclosure url="https://github.com/EZ-LOGGER/ez-logger/releases/download/v1.0.11/EZLogger-1.0.11.dmg" length="15647944" type="application/octet-stream" sparkle:edSignature="/lRXZV8C8JqR52cer+tRksq5JneMrshdcCdD4YrSYcSI+TpsX86X8Sw6HT+aTC56kRenvTItgfPxsmEwIjY5BA=="/>
-        </item>
-        <item>
-            <title>1.0.10</title>
-            <pubDate>Mon, 16 Nov 2026 10:49:38 -0500</pubDate>
-            <sparkle:version>1.0.10</sparkle:version>
-            <sparkle:shortVersionString>1.0.10</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/EZ-LOGGER/ez-logger/releases/download/v1.0.10/EZLogger-1.0.10.dmg" length="15650395" type="application/octet-stream" sparkle:edSignature="3NxEQCP+WrDnGyY7+0TtHslqo+7u4lGocAiyZttEvkLs6RNS+HC7BMBWdFK5JN/FOyS7YFm0nCa3SaoOZVwbDQ=="/>
         </item>
     </channel>
 </rss>
