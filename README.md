@@ -31,7 +31,7 @@ EZ Logger gives you a keyboard-driven tagging window for sports video. After a b
 
 ## Workflow
 
-**1. Setup Session** — Set sport, opponent, videographer, phase, and footage folder (once per game)
+**1. Pick a folder and naming** — Click your footage folder in the sidebar Folders panel (⌘← / ⌘→ step between game folders), and set up the filename format in the **Naming** tab
 
 **2. Batch Rename** — Stamps all videos in the folder with file creation timestamps
 

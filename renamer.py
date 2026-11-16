@@ -23,7 +23,7 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from datetime import datetime
 
-APP_VERSION = "1.0.11"
+APP_VERSION = "1.0.12"
 
 CRASH_LOG_DIR  = os.path.expanduser("~/.ezlogger/crashes")
 CRASH_EMAIL_TO = "zachjkeding@gmail.com"
@@ -190,6 +190,10 @@ DEFAULT_SETTINGS = {
     "undo_stack_size":         50,
     # Onboarding
     "seen_tutorial":           False,
+    # Folder browsing
+    "favorite_folders":        [],
+    "recent_folders":          [],
+    "folder_tree_expanded":    [],
 }
 
 # Maps athletics site URL slugs to internal sport codes
@@ -210,7 +214,6 @@ SLUG_TO_CODE = {
 }
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".m4v", ".mxf", ".mpg", ".mpeg", ".mkv"}
-PHASE_OPTIONS    = ["PRE","1H","2H","OT","POST","PRAC","SCOUT"]
 
 DATE_FORMATS = [
     ("YYYYMMDD",   "%Y%m%d"),
@@ -1199,7 +1202,7 @@ class SafeRenamer:
     def validate_folder(folder) -> tuple[bool, str]:
         """Check that the session folder is usable. Returns (ok, error)."""
         if not folder:
-            return False, "No session folder configured. Set a folder in Setup Session."
+            return False, "No folder chosen. Pick one in the Folders panel."
         real = os.path.realpath(str(folder))
         if not os.path.isdir(real):
             return False, f"Session folder does not exist: {folder}"
@@ -1660,13 +1663,286 @@ def tag_base_stem(stem, record):
     return stem.rstrip("_")
 
 
-def save_tag_records(records):
-    """Save the tagged-clip records. The rename already happened, so a failure here must not raise."""
+def folder_key(folder):
+    """The string a folder is stored under: absolute and normalized, no trailing slash."""
+    if not folder:
+        return ""
+    return os.path.normpath(os.path.abspath(os.path.expanduser(str(folder))))
+
+
+def _tag_record_store():
+    """The whole records file as {"version": 2, "folders": {folder: {name: record}},
+    "legacy": {name: record}}. Records used to be keyed by filename alone, which
+    mixed up clips sharing a camera name (C0001.MP4) across folders; those old
+    entries wait in "legacy" until a folder holding that name claims them."""
+    data = load_json(TAG_RECORDS_FILE, {})
+    if not isinstance(data, dict) or data.get("version") != 2:
+        legacy = data if isinstance(data, dict) else {}
+        data = {"version": 2, "folders": {}, "legacy": dict(legacy)}
+    data.setdefault("folders", {})
+    data.setdefault("legacy", {})
+    return data
+
+
+def load_tag_records(folder):
+    """Return {clip name: record} for one folder. Old filename-only records move
+    into the first folder found holding a clip of that name."""
+    key  = folder_key(folder)
+    data = _tag_record_store()
+    recs = dict(data["folders"].get(key, {}))
+    legacy = data["legacy"]
+    if legacy and key and os.path.isdir(key):
+        try:
+            present = set(os.listdir(key))
+        except OSError:
+            present = set()
+        claimed = [n for n in legacy if n in present and n not in recs]
+        if claimed:
+            for n in claimed:
+                recs[n] = legacy.pop(n)
+            data["folders"][key] = recs
+            _write_tag_record_store(data)
+    return recs
+
+
+def _write_tag_record_store(data):
     try:
         os.makedirs(os.path.dirname(TAG_RECORDS_FILE), exist_ok=True)
-        save_json(TAG_RECORDS_FILE, records)
+        save_json(TAG_RECORDS_FILE, data)
     except Exception:
         pass
+
+
+def save_tag_records(records, folder):
+    """Save one folder's tagged-clip records. The rename already happened, so a
+    failure here must not raise."""
+    try:
+        key  = folder_key(folder)
+        data = _tag_record_store()
+        if records:
+            data["folders"][key] = records
+        else:
+            data["folders"].pop(key, None)
+        _write_tag_record_store(data)
+    except Exception:
+        pass
+
+
+# ── Folder browsing (Folders panel, path bar) ─────────────────────────────────
+
+FOLDER_RECENTS_MAX = 10
+# Folders macOS shows as single files; never browse into them
+PACKAGE_SUFFIXES = {".app", ".bundle", ".framework", ".fcpbundle", ".photoslibrary",
+                    ".prproj", ".lrdata", ".lrlibrary", ".imovielibrary", ".tvlibrary",
+                    ".musiclibrary", ".plugin", ".kext", ".pkg", ".rtfd", ".xcodeproj"}
+
+
+def natural_key(name):
+    """Sort "Game 2" before "Game 10", ignoring case."""
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name)]
+
+
+def list_subfolders(folder):
+    """Folders directly inside `folder`, in natural order. Skips hidden folders and
+    packages. Empty when the folder can't be read."""
+    out = []
+    try:
+        with os.scandir(folder) as it:
+            for e in it:
+                if e.name.startswith("."):
+                    continue
+                if os.path.splitext(e.name)[1].lower() in PACKAGE_SUFFIXES:
+                    continue
+                try:
+                    if e.is_dir():
+                        out.append(Path(e.path))
+                except OSError:
+                    continue
+    except OSError:
+        return []
+    out.sort(key=lambda p: natural_key(p.name))
+    return out
+
+
+def count_clips(folder, cap=9999):
+    """Number of video clips directly inside `folder` (what the clip list would show)."""
+    n = 0
+    try:
+        with os.scandir(folder) as it:
+            for e in it:
+                if is_video(Path(e.name)):
+                    try:
+                        if e.is_file():
+                            n += 1
+                    except OSError:
+                        continue
+                    if n >= cap:
+                        break
+    except OSError:
+        return 0
+    return n
+
+
+def add_recent_folder(recents, folder, cap=FOLDER_RECENTS_MAX):
+    """Newest first, no duplicates, at most `cap` entries."""
+    key = folder_key(folder)
+    if not key:
+        return list(recents or [])
+    out = [key] + [f for f in (recents or []) if folder_key(f) != key]
+    return out[:cap]
+
+
+def toggle_favorite(favorites, folder):
+    """Add `folder` to the end of the favorites, or remove it if it's already there."""
+    key  = folder_key(folder)
+    favs = [f for f in (favorites or []) if folder_key(f) != key]
+    if len(favs) == len(favorites or []):
+        favs.append(key)
+    return favs
+
+
+def is_favorite(favorites, folder):
+    key = folder_key(folder)
+    return any(folder_key(f) == key for f in (favorites or []))
+
+
+class FolderHistory:
+    """Back and forward through the folders visited, like a browser."""
+
+    def __init__(self, limit=50):
+        self.back_stack    = []
+        self.forward_stack = []
+        self.limit         = limit
+
+    def visit(self, current):
+        """Record leaving `current` for a new folder. Clears forward history."""
+        if current:
+            if not self.back_stack or self.back_stack[-1] != current:
+                self.back_stack.append(current)
+                del self.back_stack[:-self.limit]
+        self.forward_stack.clear()
+
+    def back(self, current):
+        if not self.back_stack:
+            return None
+        if current:
+            self.forward_stack.append(current)
+        return self.back_stack.pop()
+
+    def forward(self, current):
+        if not self.forward_stack:
+            return None
+        if current:
+            self.back_stack.append(current)
+        return self.forward_stack.pop()
+
+    def can_back(self):
+        return bool(self.back_stack)
+
+    def can_forward(self):
+        return bool(self.forward_stack)
+
+
+def volume_root(path):
+    """The mounted volume a path lives on: /Volumes/NAS for /Volumes/NAS/a/b, else None."""
+    parts = Path(folder_key(path)).parts
+    if len(parts) >= 3 and parts[1] == "Volumes":
+        return Path(*parts[:3])
+    return None
+
+
+def folder_breadcrumbs(path, home=None):
+    """[(label, Path)] from the top of the path down to `path`. Starts at the volume
+    for drives and NAS shares, at Home for the user's folders, else at the disk root."""
+    p = Path(folder_key(path))
+    home = Path(folder_key(home or os.path.expanduser("~")))
+    vol = volume_root(p)
+    if vol is not None:
+        top, crumbs = vol, [(vol.name, vol)]
+    elif p == home or home in p.parents:
+        top, crumbs = home, [("Home", home)]
+    else:
+        top, crumbs = Path("/"), [("Mac", Path("/"))]
+    cur = top
+    for part in p.relative_to(top).parts:
+        cur = cur / part
+        crumbs.append((part, cur))
+    return crumbs
+
+
+def neighbor_folder(folder, step):
+    """The folder `step` places after (or before, if negative) `folder` among its
+    parent's subfolders, in natural order. None at either end."""
+    p = Path(folder_key(folder))
+    if p.parent == p:
+        return None
+    siblings = [folder_key(s) for s in list_subfolders(p.parent)]
+    key = folder_key(p)
+    if key not in siblings:
+        return None
+    i = siblings.index(key) + step
+    return Path(siblings[i]) if 0 <= i < len(siblings) else None
+
+
+def _volume_browsable(path):
+    """False for volumes Finder hides (Recovery, Preboot and the like)."""
+    try:
+        from Foundation import NSURL
+        ok, val, _err = NSURL.fileURLWithPath_(str(path)).getResourceValue_forKey_error_(
+            None, "NSURLVolumeIsBrowsableKey", None)
+        return bool(val) if ok and val is not None else True
+    except Exception:
+        return True
+
+
+def folder_roots(home=None, volumes_dir="/Volumes"):
+    """Top-level entries of the Folders tree: [(label, Path, sf_symbol)]. The usual
+    home folders that exist, then every mounted drive and NAS share except the
+    startup disk."""
+    home = Path(home or os.path.expanduser("~"))
+    roots = []
+    for name, sym in (("Desktop", "menubar.dock.rectangle"), ("Movies", "film"),
+                      ("Documents", "doc"), ("Downloads", "arrow.down.circle")):
+        p = home / name
+        if p.is_dir():
+            roots.append((name, p, sym))
+    try:
+        vols = sorted(os.listdir(volumes_dir), key=natural_key)
+    except OSError:
+        vols = []
+    for v in vols:
+        if v.startswith("."):
+            continue
+        vp = Path(volumes_dir) / v
+        try:
+            if os.path.realpath(vp) == "/" or not vp.is_dir():
+                continue   # the startup disk's alias in /Volumes
+        except OSError:
+            continue
+        if not _volume_browsable(vp):
+            continue
+        roots.append((v, vp, "externaldrive"))
+    return roots
+
+
+def tree_ancestors(folder, roots):
+    """Folders to expand so `folder` shows in the tree: every folder from the root
+    that holds it down to its parent. Empty when no root holds it."""
+    p = Path(folder_key(folder))
+    best = None
+    for r in roots:
+        rk = Path(folder_key(r))
+        if (p == rk or rk in p.parents) and (best is None or len(rk.parts) > len(best.parts)):
+            best = rk
+    if best is None:
+        return []
+    out, cur = [], p.parent
+    while best == cur or best in cur.parents:
+        out.append(folder_key(cur))
+        if cur == best:
+            break
+        cur = cur.parent
+    return list(reversed(out))
 
 
 def batch_base_stem(name, was_deduped):
@@ -1693,7 +1969,7 @@ def match_renames(old_inodes, new_inodes):
 
 
 def move_records_for_renames(records, renames):
-    """Carry tag records (base, colors, reject) over to clips renamed outside the
+    """Carry tag records (base, colors) over to clips renamed outside the
     app. Never replaces a record already stored under the new name. Returns True
     when anything moved."""
     moved = False
@@ -1726,35 +2002,6 @@ def follow_multi_selection(names, selected, renames, lead_idx):
     if lead_idx >= 0:
         rows.add(lead_idx)
     return sorted(rows)
-
-
-def reject_toggle_target(names, rejected):
-    """X on several clips: mark them all unless every one is already a reject."""
-    return not all(n in rejected for n in names)
-
-
-def rejected_names(records, names):
-    """Return the clip names in `names` that are marked as rejects."""
-    return {n for n in names if (records.get(n) or {}).get("reject")}
-
-
-def set_reject(records, name, on):
-    """Mark or unmark a clip as a reject in the tag records, in place."""
-    rec = dict(records.get(name) or {})
-    if on:
-        rec["reject"] = True
-    else:
-        rec.pop("reject", None)
-    if rec:
-        records[name] = rec
-    else:
-        records.pop(name, None)
-
-
-def trash_targets(files, selected, rejected):
-    """Clips the Naming tab's trash button acts on: the selection, else the rejects."""
-    pick = selected if selected else rejected
-    return [f for f in files if f.name in pick]
 
 
 def undo_op_available(op):
@@ -2040,31 +2287,42 @@ def _install_cmd_z_monitor(tag_window):
         1 << 10, handler)   # NSEventMaskKeyDown
 
 
-def _style_reject_cell(owner, cell, row, text=None):
-    """Strike through and dim a clip marked as a reject in a file list.
-    text is the cell's string when it isn't the clip name (an info column)."""
-    if not owner or not (0 <= row < len(owner._files)):
+_folder_nav_target  = None
+_folder_nav_monitor = None
+
+
+def _install_folder_nav_monitor(tag_window):
+    """Folder shortcuts on every tab: ⌘[ back, ⌘] forward, ⌘↑ enclosing folder,
+    ⌘← / ⌘→ previous / next folder beside this one. Text fields keep their keys."""
+    global _folder_nav_target, _folder_nav_monitor
+    _folder_nav_target = tag_window
+    if _folder_nav_monitor is not None:
         return
-    name = owner._files[row].name
-    if name not in getattr(owner, "_rejected", ()):
-        return
-    if text is not None:
-        name = text
-    from AppKit import (NSAttributedString, NSMutableParagraphStyle, NSColor,
-                        NSStrikethroughStyleAttributeName, NSFontAttributeName,
-                        NSForegroundColorAttributeName, NSParagraphStyleAttributeName)
-    para = NSMutableParagraphStyle.alloc().init()
-    para.setLineBreakMode_(3)
-    para.setAlignment_(cell.alignment())   # info columns can be right-aligned
-    attrs = {
-        NSStrikethroughStyleAttributeName: 1,
-        NSForegroundColorAttributeName:    NSColor.tertiaryLabelColor(),
-        NSParagraphStyleAttributeName:     para,
-    }
-    if cell.font() is not None:
-        attrs[NSFontAttributeName] = cell.font()
-    cell.setAttributedStringValue_(
-        NSAttributedString.alloc().initWithString_attributes_(name, attrs))
+    from AppKit import NSEvent, NSText
+    actions = {"[": "back", "]": "forward", "\uf700": "up",
+               "\uf702": "prev", "\uf703": "next"}
+
+    def handler(event):
+        try:
+            target = _folder_nav_target
+            flags  = event.modifierFlags()
+            if (target is None or event.window() is None
+                    or event.window() != target.win
+                    or not (flags & 0x100000)                    # ⌘
+                    or (flags & (0x20000 | 0x80000 | 0x40000))): # ⇧ ⌥ ⌃
+                return event
+            action = actions.get(event.charactersIgnoringModifiers() or "")
+            if action is None:
+                return event
+            if isinstance(target.win.firstResponder(), NSText):
+                return event
+            target._folder_nav(action)
+            return None
+        except Exception:
+            return event
+
+    _folder_nav_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+        1 << 10, handler)   # NSEventMaskKeyDown
 
 
 def log_stat(session, player, play, rating, steps=None):
@@ -2193,7 +2451,7 @@ NowCardResizer       = None
 CardHeightResizer    = None
 
 def make_objc_classes():
-    global _classes_made, KeyTableView, NavItemView, ActionButton, PillButton, MenuTarget, MainCaller, FileListDelegate, NamingClipsDelegate, NamingClipsTable, QLDataSource, SearchResultsDelegate, SearchResultsTable, HoverButton, add_hover_highlight, clear_hover_highlight, hover_press_down, hover_press_up, hover_dip, WindowDelegate, FilePanelResizer, NowCardResizer, CardHeightResizer, TutorialOverlay, EmojiField, VCenterTextCell
+    global _classes_made, KeyTableView, NavItemView, ActionButton, PillButton, MenuTarget, MainCaller, FileListDelegate, NamingClipsDelegate, NamingClipsTable, QLDataSource, SearchResultsDelegate, SearchResultsTable, HoverButton, add_hover_highlight, clear_hover_highlight, hover_press_down, hover_press_up, hover_dip, WindowDelegate, FilePanelResizer, NowCardResizer, CardHeightResizer, TutorialOverlay, EmojiField, VCenterTextCell, FlippedView, FolderRowView, FolderPanelView
     if _classes_made:
         return
     _classes_made = True
@@ -2569,6 +2827,87 @@ def make_objc_classes():
 
     PillButton = _PillButton
 
+    class _FlippedView(NSView):
+        """Document view whose y grows downward, so list rows stack from the top."""
+        def isFlipped(self):
+            return True
+
+    FlippedView = _FlippedView
+
+    class _FolderRowView(NSView):
+        """One row of the sidebar Folders panel. Clicking the chevron opens or closes
+        the folder; clicking anywhere else opens it in the clip lists."""
+        def initWithFrame_(self, frame):
+            self = objc.super(_FolderRowView, self).initWithFrame_(frame)
+            if self is None:
+                return None
+            self._owner    = None
+            self._row      = None
+            self._chev_max = 0.0
+            self.setWantsLayer_(True)
+            self.layer().setCornerRadius_(6.0)
+            return self
+
+        def acceptsFirstMouse_(self, event):
+            return True
+
+        def hitTest_(self, point):
+            result = objc.super(_FolderRowView, self).hitTest_(point)
+            return self if result is not None else None
+
+        def mouseDown_(self, event):
+            if self._owner is None or self._row is None:
+                return
+            pt = self.convertPoint_fromView_(event.locationInWindow(), None)
+            if self._row.get("expandable") and pt.x <= self._chev_max:
+                self._owner._folder_tree_toggle(self._row)
+                return
+            hover_dip(self)
+            self._owner._folder_row_clicked(self._row)
+
+        def menuForEvent_(self, event):
+            if self._owner is None or self._row is None:
+                return None
+            return self._owner._folder_row_menu(self._row)
+
+        def viewDidHide(self):
+            clear_hover_highlight(self)
+
+    FolderRowView = _FolderRowView
+
+    class _FolderPanelView(NSView):
+        """The sidebar Folders panel. Folders dropped on it from Finder become favorites."""
+        _owner = None
+
+        def draggingEntered_(self, sender):
+            return 1 if self._dropped_folders(sender) else 0   # NSDragOperationCopy
+
+        def draggingUpdated_(self, sender):
+            return self.draggingEntered_(sender)
+
+        def performDragOperation_(self, sender):
+            folders = self._dropped_folders(sender)
+            if folders and self._owner is not None:
+                self._owner._add_favorite_folders(folders)
+                return True
+            return False
+
+        def _dropped_folders(self, sender):
+            from AppKit import NSURL
+            try:
+                urls = sender.draggingPasteboard().readObjectsForClasses_options_(
+                    [NSURL], {"NSPasteboardURLReadingFileURLsOnlyKey": True}) or []
+            except Exception:
+                return []
+            out = []
+            for u in urls:
+                p = u.path()
+                if p and os.path.isdir(p):
+                    out.append(str(p))
+            return out
+
+    FolderPanelView = _FolderPanelView
+
     class _MenuTarget(NSObject):
         def menuPicked_(self, sender):
             cb = getattr(self, "_callback", None)
@@ -2655,11 +2994,8 @@ def make_objc_classes():
             cid = col.identifier() if col is not None else "name"
             if cid == "name":
                 cell.setLineBreakMode_(3)  # NSLineBreakByTruncatingHead — shows end of filename where labels are
-                _style_reject_cell(self.owner, cell, row)
             else:
                 cell.setLineBreakMode_(4)  # truncate tail
-                _style_reject_cell(self.owner, cell, row,
-                                   text=self.owner._file_info_text(row, cid) if self.owner else "")
 
         def tableView_didClickTableColumn_(self, tv, col):
             if self.owner and col is not None:
@@ -2699,7 +3035,6 @@ def make_objc_classes():
 
         def tableView_willDisplayCell_forTableColumn_row_(self, tv, cell, col, row):
             cell.setLineBreakMode_(3)  # truncate the head so the end of the name stays visible
-            _style_reject_cell(self.owner, cell, row)
 
         def tableViewSelectionDidChange_(self, notif):
             if self.owner and not self._suppressed:
@@ -2730,7 +3065,7 @@ def make_objc_classes():
             if chars == "\x1b":   # ESC
                 close_quicklook()
                 return
-            # ⌘⌫ → trash the selected clips (selection only, never the rejects)
+            # ⌘⌫ → trash the selected clips
             if chars == "\x7f" and (event.modifierFlags() & 0x100000):
                 if self.owner and self.owner._naming_selected:
                     self.owner._naming_trash()
@@ -2837,6 +3172,9 @@ def make_objc_classes():
             # Back from Finder: catch changes FSEvents can miss (network drives)
             if self.owner and hasattr(self.owner, "_on_folder_changed"):
                 self.owner._on_folder_changed()
+            # A drive or NAS share may have been mounted or ejected meanwhile
+            if self.owner and hasattr(self.owner, "_refresh_folder_roots"):
+                self.owner._refresh_folder_roots()
 
     WindowDelegate = _WindowDelegate
 
@@ -3199,6 +3537,14 @@ class TagWindowV2:
         # Search-mode state
         self._search_enabled     = False   # toggled by top-bar switch
         self._naming_selected    = set()   # clip names chosen in the Naming tab for Batch Rename
+        # Folder browsing (sidebar Folders panel, path bar)
+        self._folder_history     = FolderHistory()
+        self._folder_expanded    = set(self._settings.get("folder_tree_expanded") or [])
+        self._folder_children    = {}      # {folder key: [Path]} subfolders, loaded off the main thread
+        self._folder_counts      = {}      # {folder key: clip count}
+        self._folder_loading     = set()
+        self._folder_roots       = []
+        self._folder_menu_targets = []     # MenuTargets for open path-bar / tree menus
         self._search_mode        = False
         self._search_text        = ""
         self._search_matches     = []
@@ -3350,6 +3696,7 @@ class TagWindowV2:
         self.win.setTitle_(f"EZ Logger {APP_VERSION}")
         self.win.setReleasedWhenClosed_(False)
         _install_cmd_z_monitor(self)
+        _install_folder_nav_monitor(self)
         self.win.setTitlebarAppearsTransparent_(True)
         try:
             self.win.setAppearance_(
@@ -3394,6 +3741,9 @@ class TagWindowV2:
 
         self.nav_items["session"].setSelected_(True)
 
+        # Folders panel fills the sidebar below the nav items
+        self._build_folders_panel(item_y)
+
         # ── Top bar ───────────────────────────────────────────────────────────
         TOP_H = 56
         cx = SIDEBAR_W
@@ -3432,6 +3782,9 @@ class TagWindowV2:
         tog.setAutoresizingMask_(1)  # right-anchored
         topbar.addSubview_(tog)
         self._search_toggle_btn = tog
+
+        # Path bar: back / forward / up and the folder path (left side)
+        self._build_path_bar()
 
         # Now Tagging card (Tag Mode section)
         self._build_now_tagging_card(cv, W, H, SIDEBAR_W, TOP_H)
@@ -3702,6 +4055,9 @@ class TagWindowV2:
 
         if hasattr(self, "_help_doc_container"):
             self._reposition_help_content_w(cw, ch)
+
+        if hasattr(self, "_pathbar"):
+            self._layout_path_bar()
 
         if hasattr(self, "win"):
             self.win.contentView().setNeedsDisplay_(True)
@@ -4433,11 +4789,6 @@ class TagWindowV2:
                         "⌫  Removed last label  ·  press a key or ENTER to advance")
             return
 
-        # X → mark or unmark the current clip as a reject (only between logs)
-        if key in ("x", "X") and self.step is None and not self._custom_mode:
-            self._toggle_reject_current()
-            return
-
         # + → chain: start a new player sequence on the same clip
         if key in ("+", "=") and self.step is not None and not self._custom_mode:
             self._chain_to_player()
@@ -4497,7 +4848,7 @@ class TagWindowV2:
         if self.app:
             self.app.undo_last(None)
 
-    # ── Rejects and Move to Trash ─────────────────────────────────────────────
+    # ── Move to Trash ─────────────────────────────────────────────
 
     def _select_file_row(self, idx):
         from AppKit import NSIndexSet
@@ -4542,7 +4893,7 @@ class TagWindowV2:
         if getattr(self, "_quiet_select", False) or self.step is not None:
             return
         n = len(self._selected_log_files())
-        self._set_v2_hint(f"{n} clips selected  ·  ⌘⌫ Trash  ·  X reject  ·  ↵ log one")
+        self._set_v2_hint(f"{n} clips selected  ·  ⌘⌫ Trash  ·  ↵ log one")
 
     def _update_selection_ui(self):
         """Show the header trash button only when there's something to trash."""
@@ -4578,11 +4929,6 @@ class TagWindowV2:
         add("Quick Look", "quicklook")
         add("Show in Finder", "reveal")
         menu.addItem_(NSMenuItem.separatorItem())
-        all_rejects = not reject_toggle_target([f.name for f in files], self._rejected)
-        add(("Unmark Reject" if all_rejects else "Mark as Reject") if n == 1 else
-            (f"Unmark {n} Rejects" if all_rejects else f"Mark {n} as Rejects"),
-            "reject", idle)
-        menu.addItem_(NSMenuItem.separatorItem())
         add("Move to Trash" if n == 1 else f"Move {n} Clips to Trash", "trash", idle)
         return menu
 
@@ -4600,55 +4946,8 @@ class TagWindowV2:
             from Foundation import NSURL
             NSWorkspace.sharedWorkspace().activateFileViewerSelectingURLs_(
                 [NSURL.fileURLWithPath_(str(f)) for f in files])
-        elif key == "reject":
-            self._toggle_reject_current()
         elif key == "trash":
             self._trash_current_clip()
-
-    def _toggle_reject_current(self):
-        files = self._selected_log_files()
-        if len(files) > 1:
-            self._toggle_reject_many([f.name for f in files])
-            return
-        idx = self._selected_file_idx
-        if not (0 <= idx < len(self._files)):
-            return
-        name = self._files[idx].name
-        on = name not in self._rejected
-        records = load_json(TAG_RECORDS_FILE, {})
-        set_reject(records, name, on)
-        save_tag_records(records)
-        if on:
-            self._rejected.add(name)
-        else:
-            self._rejected.discard(name)
-        self._file_list_table.reloadData()
-        self._refresh_naming_clips()
-        if on:
-            # Move on first: selecting a clip resets the hint
-            if idx + 1 < len(self._files):
-                self._select_file_row(idx + 1)
-            self._set_v2_hint(
-                f"✕  Marked as reject ({len(self._rejected)})  ·  X to unmark  ·  "
-                "trash rejects from the Naming tab")
-        else:
-            self._set_v2_hint("Reject removed  ·  ENTER to log this clip")
-
-    def _toggle_reject_many(self, names):
-        on = reject_toggle_target(names, self._rejected)
-        records = load_json(TAG_RECORDS_FILE, {})
-        for name in names:
-            set_reject(records, name, on)
-            if on:
-                self._rejected.add(name)
-            else:
-                self._rejected.discard(name)
-        save_tag_records(records)
-        self._file_list_table.reloadData()
-        self._refresh_naming_clips()
-        self._set_v2_hint(
-            f"✕  Marked {len(names)} clips as rejects ({len(self._rejected)} in all)"
-            if on else f"Rejects removed from {len(names)} clips")
 
     def _trash_current_clip(self):
         """⌘⌫, the header trash button or the right-click menu: move every
@@ -4668,7 +4967,7 @@ class TagWindowV2:
                 + "  ·  ⌘Z to put back")
 
     def _naming_trash(self):
-        targets = trash_targets(self._files, self._naming_selected, self._rejected)
+        targets = [f for f in self._files if f.name in self._naming_selected]
         if self.app and targets:
             self.app.trash_clips(targets, self.folder)
 
@@ -5027,7 +5326,7 @@ class TagWindowV2:
         close_quicklook()
 
         tag_str  = "_".join(self._tag_parts)
-        records  = load_json(TAG_RECORDS_FILE, {})
+        records  = load_tag_records(f.parent)
         record   = records.get(f.name)
         base     = tag_base_stem(f.stem, record)
         new_name = f"{base}_{tag_str}{f.suffix}" if tag_str else f"{base}{f.suffix}"
@@ -5081,7 +5380,7 @@ class TagWindowV2:
         records.pop(old_name, None)
         if tag_str:
             records[new_name] = {"base": base, "colors": [] if color_failed else colors}
-        save_tag_records(records)
+        save_tag_records(records, f.parent)
 
         if self.app:
             undo_entry = {"old": old_name, "new": new_name}
@@ -5263,7 +5562,6 @@ class TagWindowV2:
         self._file_inodes      = {}      # {name: inode} from the last scan, to spot Finder renames
         self._folder_missing   = False
         self._quiet_select     = False
-        self._rejected         = set()   # clip names marked as rejects (X in Log Mode)
         self._selected_file_idx = -1
         self._file_list_delegate = FileListDelegate.alloc().init()
         self._file_list_delegate.owner = self
@@ -5600,6 +5898,7 @@ class TagWindowV2:
             "Open Folder", COLOR_CRIMSON, "#6b1a26", self._session_choose_folder)
         btn.setAutoresizingMask_(CENTER_FIXED)
         ov.addSubview_(btn)
+        self._empty_state_btn = btn
 
         self._empty_state_overlay = ov
         self._empty_state_msg     = msg
@@ -5643,10 +5942,10 @@ class TagWindowV2:
         renames = match_renames(self._file_inodes, inodes) if self._file_inodes else {}
         self._file_inodes = inodes
 
-        records = load_json(TAG_RECORDS_FILE, {})
+        records = load_tag_records(self.folder)
         if renames:
             if move_records_for_renames(records, renames):
-                save_tag_records(records)
+                save_tag_records(records, self.folder)
             self._naming_selected = {renames.get(n, n) for n in self._naming_selected}
 
         folder_missing = bool(self.folder) and not self.folder.is_dir()
@@ -5656,7 +5955,6 @@ class TagWindowV2:
         self._folder_missing = folder_missing
 
         self._files    = files
-        self._rejected = rejected_names(records, set(names))
         new_idx = pick_selection(names, prev_name, renames, prev_idx)
         self._selected_file_idx = new_idx
         if hasattr(self, "_file_list_table"):
@@ -5686,9 +5984,15 @@ class TagWindowV2:
                     msg = "Folder not found"
                 elif not self.folder:
                     msg = "No folder selected"
+                elif self._folder_children.get(folder_key(self.folder)):
+                    msg = "No clips here. Open a folder inside it"
                 else:
                     msg = "No video files found"
                 self._empty_state_msg.setStringValue_(msg)
+                if hasattr(self, "_empty_state_btn"):
+                    # Only needed when there's no usable folder; otherwise the
+                    # Folders panel is the way to move on
+                    self._empty_state_btn.setHidden_(bool(self.folder) and not folder_missing)
         self._refresh_naming_clips()
         if hasattr(self, "_media_info"):
             self._queue_media_info()
@@ -8332,7 +8636,6 @@ class TagWindowV2:
         self._session_section = section
 
         HEADER_H  = 64.0
-        FOLDER_H  = 54.0
         header_y  = ch - HEADER_H
 
         # ── Header ────────────────────────────────────────────────────────────
@@ -8354,54 +8657,10 @@ class TagWindowV2:
         sep.setAutoresizingMask_(2 | 8)
         section.addSubview_(sep)
 
-        # ── Folder row ────────────────────────────────────────────────────────
+        # The folder is chosen in the sidebar Folders panel and shown in the path bar
         layout_w = self._naming_form_area_w(cw)
         FORM_W  = min(560.0, layout_w - 80.0)
         form_x  = (layout_w - FORM_W) / 2
-        folder_row_y = header_y - FOLDER_H - 12.0
-
-        s = self.app.session if self.app else DEFAULT_SESSION
-        self._session_folder = s.get("folder", "")
-        folder_name = Path(self._session_folder).name or "No folder selected"
-        LABEL_W  = 80.0
-        FIELD_H  = 34.0
-        CHOOSE_W = 130.0
-
-        row_bg = NSView.alloc().initWithFrame_(
-            NSMakeRect(form_x, folder_row_y, FORM_W, FOLDER_H))
-        row_bg.setWantsLayer_(True)
-        row_bg.layer().setCornerRadius_(10.0)
-        row_bg.layer().setBackgroundColor_(
-            _hex_color_alpha("#ffffff", 0.04).CGColor())
-        row_bg.layer().setBorderWidth_(0.5)
-        row_bg.layer().setBorderColor_(
-            _hex_color_alpha("#ffffff", 0.08).CGColor())
-        section.addSubview_(row_bg)
-        self._folder_row = row_bg
-
-        folder_lbl = NSTextField.labelWithString_("Folder")
-        folder_lbl.setFont_(NSFont.systemFontOfSize_(13))
-        folder_lbl.setTextColor_(NSColor.secondaryLabelColor())
-        folder_lbl.setFrame_(NSMakeRect(16, (FOLDER_H - 17) / 2, LABEL_W, 17))
-        row_bg.addSubview_(folder_lbl)
-
-        field_x = LABEL_W + 24.0
-        path_w  = FORM_W - field_x - CHOOSE_W - 24.0
-
-        path_lbl = NSTextField.labelWithString_(folder_name)
-        path_lbl.setFont_(NSFont.systemFontOfSize_(12))
-        path_lbl.setTextColor_(NSColor.secondaryLabelColor())
-        path_lbl.setFrame_(NSMakeRect(field_x, (FOLDER_H - 17) / 2, path_w, 17))
-        path_lbl.setLineBreakMode_(5)
-        row_bg.addSubview_(path_lbl)
-        self._folder_path_lbl = path_lbl
-
-        choose_btn = ActionButton.alloc().initWithFrame_(
-            NSMakeRect(field_x + path_w + 10, (FOLDER_H - 28) / 2, CHOOSE_W, 28))
-        choose_btn.configureTitle_bg_press_action_(
-            "Choose Folder…", "#3a3a3c", "#2c2c2e", self._session_choose_folder)
-        row_bg.addSubview_(choose_btn)
-        self._tutorial_folder_row = row_bg
 
         # Store form metrics for convention builder to reuse
         self._conv_form_w = FORM_W
@@ -8638,16 +8897,10 @@ class TagWindowV2:
             self._naming_clips_status.setStringValue_(text)
             self._naming_clear_btn.setHidden_(count == 0)
         if hasattr(self, "_naming_trash_btn"):
-            n_rej = len(self._rejected)
-            if count:
-                trash_title = f"Move {count} to Trash"
-            elif n_rej:
-                trash_title = f"Trash {n_rej} Rejected"
-            else:
-                trash_title = "Move to Trash"
             self._naming_trash_btn.configureTitle_bg_press_action_(
-                trash_title, *self.TRASH_BTN_COLORS, self._naming_trash)
-            self._naming_trash_btn.setHidden_(not (count or n_rej))
+                f"Move {count} to Trash" if count else "Move to Trash",
+                *self.TRASH_BTN_COLORS, self._naming_trash)
+            self._naming_trash_btn.setHidden_(not count)
         if hasattr(self, "_batch_btn"):
             title = f"Batch Rename ({count})" if count else "Batch Rename"
             self._batch_btn.configureTitle_bg_press_action_(
@@ -8768,18 +9021,604 @@ class TagWindowV2:
     def _session_choose_folder(self):
         folder = pick_folder_dialog()
         if folder:
-            self._session_folder = folder
-            name = Path(folder).name or folder
-            if hasattr(self, "_folder_path_lbl"):
-                self._folder_path_lbl.setStringValue_(name)
-            if self.app:
-                self.app.session["folder"] = folder
-                save_json(CONFIG_FILE, self.app.session)
-                self.app._build_menu()
-            self.folder = Path(folder)
-            self._file_inodes = {}   # a different folder: nothing here was renamed
+            self.switch_folder(folder)
+
+    # ── Folder browsing: switching, history, Folders panel, path bar ─────────
+
+    def switch_folder(self, folder, history=True):
+        """Show another folder's clips. Every way of changing folder comes through
+        here. Refused while a clip is being logged, since finishing would rename a
+        clip that's no longer listed. Returns True when the folder changed."""
+        key = folder_key(folder)
+        if not key:
+            return False
+        cur = folder_key(self.folder) if self.folder else ""
+        if key == cur:
             self._refresh_files()
-            self._start_folder_watch()
+            return True
+        if self.step is not None:
+            self._refuse_folder_change()
+            return False
+        if not os.path.isdir(key):
+            self._set_v2_hint(f"⚠  {Path(key).name} isn't available. Is the drive connected?")
+            return False
+        if history:
+            self._folder_history.visit(cur)
+
+        if self.app:
+            self.app.session["folder"] = key
+            save_json(CONFIG_FILE, self.app.session)
+            self.app._build_menu()
+        recents = add_recent_folder(self._settings.get("recent_folders") or [], key)
+        self._settings["recent_folders"] = recents
+        _save_setting("recent_folders", recents)
+
+        # A new folder: nothing selected, nothing renamed, nothing picked for Batch Rename
+        self.folder = Path(key)
+        self._file_inodes       = {}
+        self._files             = []
+        self._selected_file_idx = -1
+        self._naming_selected   = set()
+        close_quicklook()
+        if hasattr(self, "_now_filename"):
+            self._now_filename.setStringValue_("")
+        self._thumb_for_path = None
+        if hasattr(self, "_now_thumb_img"):
+            self._now_thumb_img.setHidden_(True)
+        if hasattr(self, "_now_thumb_icon"):
+            self._now_thumb_icon.setHidden_(False)
+        self._refresh_files()
+        self._start_folder_watch()
+        if self.step is None:
+            n = len(self._files)
+            self._set_v2_hint(f"📁  {Path(key).name}  ·  {n} clip{'s' if n != 1 else ''}")
+        self._reveal_folder_in_tree(key)
+        self._layout_path_bar()
+        return True
+
+    def _refuse_folder_change(self):
+        self._set_v2_hint("Finish this log or press ESC before changing folders")
+        try:
+            from AppKit import NSBeep
+            NSBeep()
+        except Exception:
+            pass
+
+    def _folder_nav(self, action):
+        """Back, forward, up, previous or next folder (path bar buttons and ⌘ keys)."""
+        if self.step is not None:
+            self._refuse_folder_change()
+            return
+        cur = folder_key(self.folder) if self.folder else ""
+        if action == "back":
+            target = self._folder_history.back(cur)
+            if target and not self.switch_folder(target, history=False):
+                self._folder_history.forward(target)    # couldn't go: undo the step
+        elif action == "forward":
+            target = self._folder_history.forward(cur)
+            if target and not self.switch_folder(target, history=False):
+                self._folder_history.back(target)
+        elif action == "up" and cur:
+            parent = Path(cur).parent
+            if str(parent) != cur:
+                self.switch_folder(parent)
+        elif action in ("prev", "next") and cur:
+            target = neighbor_folder(cur, -1 if action == "prev" else 1)
+            if target is not None:
+                self.switch_folder(target)
+            elif self.step is None:
+                self._set_v2_hint("No more folders " + ("before" if action == "prev" else "after")
+                                  + f" {Path(cur).name}")
+        if hasattr(self, "_pathbar"):
+            self._layout_path_bar()
+
+    def _add_favorite_folders(self, folders):
+        favs = list(self._settings.get("favorite_folders") or [])
+        for f in folders:
+            if not is_favorite(favs, f):
+                favs = toggle_favorite(favs, f)
+        self._set_favorites(favs)
+
+    def _toggle_favorite_folder(self, folder):
+        self._set_favorites(toggle_favorite(self._settings.get("favorite_folders") or [], folder))
+
+    def _set_favorites(self, favs):
+        self._settings["favorite_folders"] = favs
+        _save_setting("favorite_folders", favs)
+        self._folder_count_async(favs)
+        self._rebuild_folder_tree()
+        self._layout_path_bar()
+
+    def _show_in_finder(self, folder):
+        try:
+            from AppKit import NSWorkspace, NSURL
+            NSWorkspace.sharedWorkspace().activateFileViewerSelectingURLs_(
+                [NSURL.fileURLWithPath_(folder_key(folder))])
+        except Exception:
+            pass
+
+    # ── Folders panel (sidebar, below the nav items) ─────────────────────────
+
+    def _build_folders_panel(self, nav_bottom_y):
+        from AppKit import NSScrollView, NSView, NSColor, NSMakeRect
+        W = float(self._SIDEBAR_W)
+        top = nav_bottom_y - 6.0
+        panel = FolderPanelView.alloc().initWithFrame_(NSMakeRect(0, 0, W, max(0.0, top)))
+        panel._owner = self
+        panel.setAutoresizingMask_(16)          # grows with the window; bottom stays put
+        panel.registerForDraggedTypes_(["public.file-url"])
+        self._sidebar.addSubview_(panel)
+        self._folders_panel = panel
+        self._tutorial_folder_row = panel
+
+        sep = NSView.alloc().initWithFrame_(NSMakeRect(20, max(0.0, top) - 1, W - 40, 1))
+        sep.setWantsLayer_(True)
+        sep.layer().setBackgroundColor_(NSColor.separatorColor().CGColor())
+        sep.setAutoresizingMask_(8)             # pinned to the top of the panel
+        panel.addSubview_(sep)
+
+        sv = NSScrollView.alloc().initWithFrame_(
+            NSMakeRect(0, 8, W, max(0.0, top - 14)))
+        sv.setHasVerticalScroller_(True)
+        sv.setAutohidesScrollers_(True)
+        sv.setBorderType_(0)
+        sv.setDrawsBackground_(False)
+        sv.setAutoresizingMask_(2 | 16)
+        doc = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, W, 10))
+        sv.setDocumentView_(doc)
+        panel.addSubview_(sv)
+        self._folders_sv  = sv
+        self._folders_doc = doc
+
+        self._folder_roots = folder_roots()
+        self._reveal_folder_in_tree(folder_key(self.folder) if self.folder else "",
+                                    open_empty=False)   # clips aren't scanned yet
+        self._folder_count_async(self._settings.get("favorite_folders") or [])
+
+    def _refresh_folder_roots(self):
+        """Pick up drives and NAS shares mounted or ejected since the last look."""
+        if not hasattr(self, "_folders_doc"):
+            return
+        roots = folder_roots()
+        if [r[1] for r in roots] != [r[1] for r in self._folder_roots]:
+            self._folder_roots = roots
+            self._rebuild_folder_tree()
+
+    def _reveal_folder_in_tree(self, key, open_empty=True):
+        """Open the tree down to `key` and scroll it into view. A folder without
+        clips opens too, so the folders inside it are one click away."""
+        if not hasattr(self, "_folders_doc"):
+            return
+        opened = tree_ancestors(key, [r[1] for r in self._folder_roots]) if key else []
+        if key and open_empty and not getattr(self, "_files", None):
+            opened.append(key)
+        changed = False
+        for k in opened:
+            if k not in self._folder_expanded:
+                self._folder_expanded.add(k)
+                changed = True
+            self._folder_tree_load(k)
+        if changed:
+            self._save_folder_expanded()
+        self._folder_scroll_to_current = True
+        self._rebuild_folder_tree()
+
+    def _save_folder_expanded(self):
+        exp = sorted(self._folder_expanded)
+        self._settings["folder_tree_expanded"] = exp
+        _save_setting("folder_tree_expanded", exp)
+
+    def _folder_tree_toggle(self, row):
+        key = folder_key(row["path"])
+        if key in self._folder_expanded:
+            self._folder_expanded.discard(key)
+        else:
+            self._folder_expanded.add(key)
+            self._folder_tree_load(key)
+        self._save_folder_expanded()
+        self._rebuild_folder_tree()
+
+    def _folder_row_clicked(self, row):
+        if row["kind"] == "other":
+            self._session_choose_folder()
+            return
+        if row.get("offline"):
+            self._set_v2_hint(f"⚠  {row['label']} isn't available. Is the drive connected?")
+            return
+        self.switch_folder(row["path"])
+
+    def _folder_row_menu(self, row):
+        from AppKit import NSMenu, NSMenuItem
+        if row.get("path") is None:
+            return None
+        path = folder_key(row["path"])
+        menu = NSMenu.alloc().init()
+        menu.setAutoenablesItems_(False)
+        self._folder_menu_targets = []
+
+        def add(title, cb, enabled=True):
+            t = MenuTarget.alloc().init()
+            t._callback = lambda _obj, cb=cb: cb()
+            self._folder_menu_targets.append(t)
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, "menuPicked:", "")
+            item.setTarget_(t)
+            item.setEnabled_(enabled)
+            menu.addItem_(item)
+
+        online = os.path.isdir(path)
+        add("Open", lambda: self.switch_folder(path), online)
+        fav = is_favorite(self._settings.get("favorite_folders") or [], path)
+        add("Remove from Favorites" if fav else "Add to Favorites",
+            lambda: self._toggle_favorite_folder(path))
+        menu.addItem_(NSMenuItem.separatorItem())
+        add("Show in Finder", lambda: self._show_in_finder(path), online)
+        return menu
+
+    def _folder_tree_load(self, key):
+        """List a folder's subfolders and count their clips off the main thread;
+        a slow NAS must never freeze the window."""
+        if not key or key in self._folder_loading:
+            return
+        self._folder_loading.add(key)
+
+        def work():
+            kids = list_subfolders(key)
+            counts = {folder_key(k): count_clips(k) for k in kids}
+
+            def done():
+                self._folder_loading.discard(key)
+                self._folder_children[key] = kids
+                self._folder_counts.update(counts)
+                self._rebuild_folder_tree()
+                if (kids and self.folder and key == folder_key(self.folder)
+                        and not self._files and hasattr(self, "_empty_state_msg")):
+                    self._empty_state_msg.setStringValue_(
+                        "No clips here. Open a folder inside it")
+            caller = MainCaller.alloc().init()
+            caller._cb = done
+            caller.performSelectorOnMainThread_withObject_waitUntilDone_("fire:", None, False)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _folder_count_async(self, folders):
+        keys = [folder_key(f) for f in folders if f]
+        if not keys:
+            return
+
+        def work():
+            counts = {k: count_clips(k) for k in keys if os.path.isdir(k)}
+
+            def done():
+                self._folder_counts.update(counts)
+                self._rebuild_folder_tree()
+            caller = MainCaller.alloc().init()
+            caller._cb = done
+            caller.performSelectorOnMainThread_withObject_waitUntilDone_("fire:", None, False)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _folder_tree_rows(self):
+        """The rows the Folders panel shows, top to bottom."""
+        rows = [{"kind": "header", "label": "FAVORITES"}]
+        favs = self._settings.get("favorite_folders") or []
+        for f in favs:
+            p = Path(f)
+            rows.append({"kind": "fav", "path": p, "label": p.name or str(p), "depth": 0,
+                         "symbol": "star.fill", "expandable": False,
+                         "offline": not os.path.isdir(f)})
+        if not favs:
+            rows.append({"kind": "hint", "label": "Drag folders here, or ☆ a folder"})
+        rows.append({"kind": "header", "label": "FOLDERS"})
+
+        def add(path, label, symbol, depth):
+            key = folder_key(path)
+            expanded = key in self._folder_expanded
+            kids = self._folder_children.get(key)
+            rows.append({"kind": "folder", "path": Path(key), "label": label, "depth": depth,
+                         "symbol": symbol, "expandable": kids is None or bool(kids),
+                         "expanded": expanded})
+            if not expanded:
+                return
+            if kids is None:
+                self._folder_tree_load(key)
+                rows.append({"kind": "loading", "label": "Loading…", "depth": depth + 1})
+                return
+            for k in kids:
+                add(k, k.name, "folder", depth + 1)
+
+        for label, path, symbol in self._folder_roots:
+            add(path, label, symbol, 0)
+        # Anywhere the tree doesn't reach: the system folder picker
+        rows.append({"kind": "other", "path": None, "label": "Other Folder…", "depth": 0,
+                     "symbol": "folder.badge.plus", "expandable": False})
+        return rows
+
+    def _rebuild_folder_tree(self):
+        from AppKit import (NSTextField, NSImageView, NSImage, NSFont, NSColor,
+                            NSMakeRect, NSMakeSize)
+        doc = getattr(self, "_folders_doc", None)
+        if doc is None:
+            return
+        for v in list(doc.subviews()):
+            v.removeFromSuperview()
+        W       = float(self._SIDEBAR_W)
+        ROW_H   = 24.0
+        HEAD_H  = 26.0
+        INDENT  = 10.0
+        cur     = folder_key(self.folder) if self.folder else ""
+        tan     = _hex_color(COLOR_TAN)
+        y       = 4.0
+        current_view = None
+
+        for row in self._folder_tree_rows():
+            kind = row["kind"]
+            if kind == "header":
+                lbl = NSTextField.labelWithString_(row["label"])
+                lbl.setFont_(NSFont.boldSystemFontOfSize_(10))
+                lbl.setTextColor_(NSColor.tertiaryLabelColor())
+                lbl.setFrame_(NSMakeRect(20, y + 9, W - 40, 14))
+                doc.addSubview_(lbl)
+                y += HEAD_H
+                continue
+            if kind in ("hint", "loading"):
+                depth = row.get("depth", 0)
+                lbl = NSTextField.labelWithString_(row["label"])
+                lbl.setFont_(NSFont.systemFontOfSize_(11))
+                lbl.setTextColor_(NSColor.tertiaryLabelColor())
+                lbl.setLineBreakMode_(4)
+                x = 20 + min(depth, 6) * INDENT + (14 if depth else 0)
+                lbl.setFrame_(NSMakeRect(x, y + 4, W - x - 12, 15))
+                doc.addSubview_(lbl)
+                y += ROW_H - 2
+                continue
+
+            key   = folder_key(row["path"]) if row.get("path") is not None else ""
+            depth = min(row.get("depth", 0), 6)
+            is_cur = bool(key) and key == cur
+            rv = FolderRowView.alloc().initWithFrame_(NSMakeRect(8, y, W - 16, ROW_H))
+            rv._owner = self
+            rv._row   = row
+            rv.setToolTip_(key or "Choose any folder with the Finder picker")
+            if is_cur:
+                rv.layer().setBackgroundColor_(_hex_color_alpha("#8c2232", 0.30).CGColor())
+                if kind == "folder":
+                    current_view = rv
+            add_hover_highlight(rv)
+
+            x = 4.0 + depth * INDENT
+            if row.get("expandable"):
+                chev = NSImageView.alloc().initWithFrame_(NSMakeRect(x, 7, 9, 10))
+                img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                    "chevron.down" if row.get("expanded") else "chevron.right", None)
+                if img:
+                    chev.setImage_(img)
+                chev.setContentTintColor_(NSColor.tertiaryLabelColor())
+                rv.addSubview_(chev)
+            rv._chev_max = x + 12
+            x += 12
+
+            icon = NSImageView.alloc().initWithFrame_(NSMakeRect(x, 5, 15, 14))
+            img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                row.get("symbol") or "folder", None)
+            if img:
+                icon.setImage_(img)
+            icon.setContentTintColor_(tan if is_cur else (
+                _hex_color(COLOR_TAN) if kind == "fav" else NSColor.secondaryLabelColor()))
+            if row.get("offline"):
+                icon.setAlphaValue_(0.4)
+            rv.addSubview_(icon)
+            x += 19
+
+            count = self._folder_counts.get(key)
+            count_w = 0.0
+            if count and not row.get("offline"):
+                cl = NSTextField.labelWithString_(str(count) if count < 9999 else "9999+")
+                cl.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(10, 0.0))
+                cl.setTextColor_(NSColor.tertiaryLabelColor())
+                cl.setAlignment_(2)   # right
+                cl.sizeToFit()
+                count_w = cl.frame().size.width + 2
+                cl.setFrame_(NSMakeRect(W - 16 - 6 - count_w, 5, count_w, 14))
+                rv.addSubview_(cl)
+
+            text = row["label"] + ("  (offline)" if row.get("offline") else "")
+            lbl = NSTextField.labelWithString_(text)
+            lbl.setFont_(NSFont.boldSystemFontOfSize_(12) if is_cur else NSFont.systemFontOfSize_(12))
+            lbl.setTextColor_(tan if is_cur else (
+                NSColor.tertiaryLabelColor() if row.get("offline") else NSColor.labelColor()))
+            lbl.setLineBreakMode_(4)   # truncate tail
+            lbl.setFrame_(NSMakeRect(x, 4, max(20.0, W - 16 - x - count_w - 8), 16))
+            rv.addSubview_(lbl)
+
+            doc.addSubview_(rv)
+            y += ROW_H
+
+        sv = self._folders_sv
+        view_h = sv.contentSize().height
+        doc.setFrameSize_(NSMakeSize(W, max(y + 6, view_h)))
+        if current_view is not None and getattr(self, "_folder_scroll_to_current", False):
+            current_view.scrollRectToVisible_(current_view.bounds())
+        self._folder_scroll_to_current = False
+
+    # ── Path bar (top bar, left side) ────────────────────────────────────────
+
+    def _build_path_bar(self):
+        from AppKit import NSView, NSMakeRect
+        bar = NSView.alloc().initWithFrame_(NSMakeRect(16, 0, 100, self.TOP_H))
+        self._topbar.addSubview_(bar)
+        self._pathbar = bar
+        self._layout_path_bar()
+
+    def _pathbar_button(self, x, symbol, enabled, handler, tip, w=26.0):
+        from AppKit import NSImageView, NSImage, NSColor, NSMakeRect
+        h = 26.0
+        b = PillButton.alloc().initWithFrame_(NSMakeRect(x, (self.TOP_H - h) / 2, w, h))
+        b.layer().setCornerRadius_(7.0)
+        b.layer().setBackgroundColor_(_hex_color("#3a3a3c").CGColor())
+        iv = NSImageView.alloc().initWithFrame_(NSMakeRect((w - 14) / 2, (h - 14) / 2, 14, 14))
+        img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol, None)
+        if img:
+            iv.setImage_(img)
+        iv.setContentTintColor_(NSColor.labelColor())
+        b.addSubview_(iv)
+        if enabled:
+            b.setClickHandler_(lambda _v, _e: handler())
+        else:
+            b.setAlphaValue_(0.35)
+        b.setToolTip_(tip)
+        self._pathbar.addSubview_(b)
+        return b
+
+    def _pathbar_text(self, x, text, bold, color, handler, tip=None, pad=8.0):
+        from AppKit import NSTextField, NSFont, NSMakeRect
+        h = 26.0
+        lbl = NSTextField.labelWithString_(text)
+        lbl.setFont_(NSFont.boldSystemFontOfSize_(13) if bold else NSFont.systemFontOfSize_(13))
+        lbl.setTextColor_(color)
+        lbl.setLineBreakMode_(4)
+        lbl.sizeToFit()
+        tw = lbl.frame().size.width
+        b = PillButton.alloc().initWithFrame_(
+            NSMakeRect(x, (self.TOP_H - h) / 2, tw + 2 * pad, h))
+        b.layer().setCornerRadius_(7.0)
+        lbl.setFrame_(NSMakeRect(pad, (h - lbl.frame().size.height) / 2,
+                                 tw, lbl.frame().size.height))
+        b.addSubview_(lbl)
+        if handler is not None:
+            b.setClickHandler_(lambda v, _e: handler(v))
+        if tip:
+            b.setToolTip_(tip)
+        self._pathbar.addSubview_(b)
+        return b
+
+    def _pathbar_measure(self, text, bold, pad=8.0):
+        from AppKit import NSTextField, NSFont
+        lbl = NSTextField.labelWithString_(text)
+        lbl.setFont_(NSFont.boldSystemFontOfSize_(13) if bold else NSFont.systemFontOfSize_(13))
+        lbl.sizeToFit()
+        return lbl.frame().size.width + 2 * pad
+
+    def _layout_path_bar(self):
+        """Rebuild the path bar for the current folder and width. Leading folders
+        fold into "…" when the path doesn't fit."""
+        from AppKit import NSColor, NSMakeRect
+        bar = getattr(self, "_pathbar", None)
+        if bar is None:
+            return
+        for v in list(bar.subviews()):
+            v.removeFromSuperview()
+        # Leave room for the ☰ button when the sidebar is hidden
+        left  = 16.0 if self._sidebar_visible else 52.0
+        right = self._search_toggle_btn.frame().origin.x - 12.0
+        bar.setFrame_(NSMakeRect(left, 0, max(0.0, right - left), self.TOP_H))
+        avail = max(0.0, right - left)
+
+        h = self._folder_history
+        x = 0.0
+        self._pathbar_button(x, "chevron.left", h.can_back(),
+                             lambda: self._folder_nav("back"), "Back (⌘[)")
+        x += 28
+        self._pathbar_button(x, "chevron.right", h.can_forward(),
+                             lambda: self._folder_nav("forward"), "Forward (⌘])")
+        x += 34
+        cur = folder_key(self.folder) if self.folder else ""
+        has_parent = bool(cur) and str(Path(cur).parent) != cur
+        self._pathbar_button(x, "arrow.up", has_parent,
+                             lambda: self._folder_nav("up"), "Enclosing folder (⌘↑)")
+        x += 36
+
+        if not cur:
+            self._pathbar_text(x, "No folder — choose one in the Folders panel", False,
+                               NSColor.secondaryLabelColor(), None)
+            return
+
+        crumbs = folder_breadcrumbs(cur)
+        STAR_W, CHEV_W, DOTS_W = 30.0, 16.0, self._pathbar_measure("…", False)
+        widths = [self._pathbar_measure(lbl, i == len(crumbs) - 1)
+                  for i, (lbl, _p) in enumerate(crumbs)]
+        # Fold leading crumbs into "…" until the rest fits
+        first = 0
+        def needed(first):
+            w = sum(widths[first:]) + CHEV_W * (len(crumbs) - first) + STAR_W
+            return w + (DOTS_W + CHEV_W if first else 0)
+        while first < len(crumbs) - 1 and x + needed(first) > avail:
+            first += 1
+
+        tan = _hex_color(COLOR_TAN)
+        if first:
+            hidden = crumbs[:first]
+            self._pathbar_text(x, "…", False, NSColor.secondaryLabelColor(),
+                               lambda v, hidden=hidden: self._pathbar_menu(
+                                   v, [p for _l, p in reversed(hidden)], show_path=True),
+                               tip="Enclosing folders")
+            x += DOTS_W
+            x = self._pathbar_chevron(x, crumbs[first - 1][1])
+        for i in range(first, len(crumbs)):
+            label, path = crumbs[i]
+            last = (i == len(crumbs) - 1)
+            b = self._pathbar_text(
+                x, label, last, tan if last else NSColor.secondaryLabelColor(),
+                None if last else (lambda _v, p=path: self.switch_folder(p)),
+                tip=str(path))
+            if last:   # the current folder: clamp so it never runs under the buttons
+                fw = min(b.frame().size.width, max(40.0, avail - x - CHEV_W - STAR_W))
+                b.setFrameSize_((fw, b.frame().size.height))
+                lbl = b.subviews()[0]
+                lbl.setFrameSize_((fw - 16, lbl.frame().size.height))
+            x += b.frame().size.width
+            x = self._pathbar_chevron(x, path)
+
+        fav = is_favorite(self._settings.get("favorite_folders") or [], cur)
+        star = self._pathbar_button(
+            x + 2, "star.fill" if fav else "star", True,
+            lambda: self._toggle_favorite_folder(cur),
+            "Remove from Favorites" if fav else "Add to Favorites", w=26.0)
+        star.layer().setBackgroundColor_(NSColor.clearColor().CGColor())
+        if fav:
+            star.subviews()[0].setContentTintColor_(tan)
+
+    def _pathbar_chevron(self, x, folder):
+        """A › after a folder: click it for the folders inside."""
+        from AppKit import NSColor
+        b = self._pathbar_text(x, "›", False, NSColor.tertiaryLabelColor(),
+                               lambda v, f=folder: self._pathbar_menu(v, list_subfolders(f)),
+                               tip="Folders inside", pad=4.0)
+        return x + b.frame().size.width
+
+    def _pathbar_menu(self, view, folders, show_path=False):
+        from AppKit import NSMenu, NSMenuItem, NSImage
+        menu = NSMenu.alloc().init()
+        menu.setAutoenablesItems_(False)
+        self._folder_menu_targets = []
+        cur = folder_key(self.folder) if self.folder else ""
+        if not folders:
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "No folders inside", None, "")
+            item.setEnabled_(False)
+            menu.addItem_(item)
+        icon = NSImage.imageWithSystemSymbolName_accessibilityDescription_("folder", None)
+        for f in folders:
+            key = folder_key(f)
+            t = MenuTarget.alloc().init()
+            t._callback = lambda _obj, k=key: self.switch_folder(k)
+            self._folder_menu_targets.append(t)
+            title = Path(key).name or key
+            n = self._folder_counts.get(key)
+            if n:
+                title += f"   ({n})"
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                title, "menuPicked:", "")
+            item.setTarget_(t)
+            if icon:
+                item.setImage_(icon)
+            if key == cur:
+                item.setState_(1)
+            menu.addItem_(item)
+        if folders:
+            self._folder_count_async([f for f in folders
+                                      if folder_key(f) not in self._folder_counts][:60])
+        menu.popUpMenuPositioningItem_atLocation_inView_(None, (0, -2), view)
+
 
     # ── Naming section — layout helpers ──────────────────────────────────────
 
@@ -8787,11 +9626,10 @@ class TagWindowV2:
         """Folder row is pinned just below the header; convention_sv fills the rest."""
         from AppKit import NSMakeRect
         HEADER_H = 64.0
-        FOLDER_H = 54.0
         GAP      = 12.0
         BOT_PAD  = 12.0
 
-        folder_row_y = ch - HEADER_H - FOLDER_H - GAP
+        conv_top = ch - HEADER_H - GAP    # convention builder fills the space below the header
         layout_w = self._naming_form_area_w(cw)
         FORM_W = min(560.0, layout_w - 80.0)
         form_x = (layout_w - FORM_W) / 2
@@ -8809,20 +9647,8 @@ class TagWindowV2:
                 self.NAMING_CLIPS_W, new_panel_h))
             self._reposition_naming_clips_panel_internals(new_panel_h)
 
-        if hasattr(self, "_folder_row"):
-            self._folder_row.setFrame_(
-                NSMakeRect(form_x, folder_row_y, FORM_W, FOLDER_H))
-            # reflow the path label width inside the row
-            if hasattr(self, "_folder_path_lbl"):
-                LABEL_W  = 80.0
-                CHOOSE_W = 130.0
-                field_x  = LABEL_W + 24.0
-                path_w   = FORM_W - field_x - CHOOSE_W - 24.0
-                self._folder_path_lbl.setFrame_(
-                    NSMakeRect(field_x, (FOLDER_H - 17) / 2, path_w, 17))
-
         conv_y = BOT_PAD
-        conv_h = max(120.0, folder_row_y - GAP - BOT_PAD)
+        conv_h = max(120.0, conv_top - BOT_PAD)
         if hasattr(self, "_convention_sv"):
             sv = self._convention_sv
             sv.setFrame_(NSMakeRect(0, conv_y, layout_w, conv_h))
@@ -10722,7 +11548,7 @@ class TagWindowV2:
         {
             "tab":     "session",
             "title":   "Choose your footage folder",
-            "body":    "Pick the folder where your video clips live. EZ Logger reads and renames files here.",
+            "body":    "Click your footage folder in the Folders panel. Click ☆ in the path bar to keep it in Favorites.",
             "ref":     "_tutorial_folder_row",
             "pad":     8,
         },
@@ -10776,7 +11602,8 @@ class TagWindowV2:
         # Compute spotlight rect in overlay (window content-view) coords
         spotlight = None
         ref_name = step["ref"]
-        if ref_name and hasattr(self, ref_name):
+        if (ref_name and hasattr(self, ref_name)
+                and not getattr(self, ref_name).isHiddenOrHasHiddenAncestor()):
             view = getattr(self, ref_name)
             # Convert view bounds to window content-view coords
             vb = view.bounds()
@@ -10888,19 +11715,30 @@ class TagWindowV2:
                 ("subhead", "SUPPORTED SPORTS"),
                 ("para", "MBB  ·  WBB  ·  MHK  ·  WHK  ·  FB  ·  WLAX  ·  BASE  ·  SB"),
             ]),
-            ("Setup Session", [
+            ("Folders", [
                 ("para",
-                 "Configure your session before logging. Choose ⚙️ Setup Session from the menu "
-                 "bar icon and answer each prompt. The current session is shown at the top "
-                 "of that menu."),
-                ("subhead", "FIELDS"),
+                 "Choose and switch folders in the Folders panel under the sidebar. It works like "
+                 "Finder's sidebar: click a folder to show its clips, click its arrow to open it. "
+                 "The number beside a folder is how many clips it holds. For a folder the panel "
+                 "doesn't reach, click Other Folder… at the bottom."),
+                ("subhead", "FAVORITES"),
+                ("para",
+                 "Click ☆ in the path bar to pin the current folder, or drag folders from Finder "
+                 "onto the Folders panel. Right-click a folder to add or remove it, or to show it "
+                 "in Finder. A favorite on a drive that isn't connected shows as offline."),
+                ("subhead", "PATH BAR"),
+                ("para",
+                 "The top bar shows where you are. Click a folder in the path to go there, or "
+                 "click › after it to pick a folder inside it."),
+                ("subhead", "SHORTCUTS"),
                 ("table", [
-                    ("Sport",        "Enter the sport code, or use the Team tab sport pill"),
-                    ("Opponent",     "Opposing team code (e.g. MIAMI, DUKE, YALE)"),
-                    ("Videographer", "Your initials or operator code (e.g. AB)"),
-                    ("Phase",        "Game phase: PRE · 1H · 2H · OT · POST · PRAC · SCOUT"),
-                    ("Folder",       "The folder containing your video files"),
+                    ("⌘[  /  ⌘]", "Back / forward through folders you've opened"),
+                    ("⌘↑",        "The folder that holds this one"),
+                    ("⌘←  /  ⌘→", "Previous / next folder beside this one (the next game)"),
                 ]),
+                ("para",
+                 "Finish or cancel a log (ESC) before changing folders. Labels are kept per "
+                 "folder, so clips with the same name in different folders never share them."),
             ]),
             ("Log Mode", [
                 ("para",
@@ -10949,19 +11787,11 @@ class TagWindowV2:
                  "Clips you don't want can be moved to the Trash without leaving the app. "
                  "Nothing is ever deleted for good: clips go to the macOS Trash, and ⌘Z "
                  "puts them back with their labels. Every move asks first."),
-                ("subhead", "MARK REJECTS WHILE LOGGING  (X)"),
+                ("subhead", "MOVE TO TRASH  (⌘⌫)"),
                 ("para",
-                 "In Log Mode, press X between logs to mark the clip as a reject. It's shown "
-                 "struck through and the next clip is selected. Press X again to unmark it. "
-                 "Logging a rejected clip clears the mark."),
-                ("subhead", "TRASH THEM WHEN YOU'RE DONE"),
-                ("para",
-                 "On the Naming tab, the Clips list has a 'Trash N Rejected' button. Select clips "
-                 "instead and it becomes 'Move N to Trash', acting on the selection only."),
-                ("subhead", "ONE CLIP AT A TIME  (⌘⌫)"),
-                ("para",
-                 "⌘⌫ moves the selected clip in Log Mode, or the selected clips in the Naming "
-                 "tab's Clips list, to the Trash. Drives without a Trash, like some network "
+                 "⌘⌫ moves the selected clips in Log Mode, or in the Naming tab's Clips list, "
+                 "to the Trash. Right-click a clip for the same option, or use the Clips list's "
+                 "'Move N to Trash' button. Drives without a Trash, like some network "
                  "shares, refuse rather than delete."),
             ]),
             ("Team & Roster", [
@@ -11123,7 +11953,6 @@ class TagWindowV2:
                     ("Backspace",      "Remove the last label · delete a character in custom-insert mode"),
                     ("↑ / ↓",          "Move through player search results"),
                     ("TAB",            "Advance to the next file (only when not mid-tag)"),
-                    ("X",              "Mark or unmark the clip as a reject (only when not mid-tag)"),
                     ("⌘⌫",            "Move the clip to the Trash (only when not mid-tag)"),
                     ("⌘Z",            "Undo the last logged file rename or Move to Trash"),
                 ]),
@@ -11422,32 +12251,6 @@ class BasketballRenamerApp(rumps.App):
 
     # ── Session setup ─────────────────────────────────────────────────────────
 
-    def setup_session(self, _):
-        s = dict(self.session)
-        fields = [
-            ("sport",        "Sport Code",           f"Options: {', '.join(all_sports())}"),
-            ("opponent",     "Opponent",              "e.g. MIAMI"),
-            ("videographer", "Videographer Initials", "e.g. AB"),
-            ("phase",        "Game Phase",            f"Options: {', '.join(PHASE_OPTIONS)}"),
-        ]
-        for key, title, hint in fields:
-            val = ask(title, hint, s[key])
-            if val is None: return
-            s[key] = _asc(val).upper()
-
-        if rumps.alert("Select Footage Folder",
-                       f"Current: {s['folder'] or 'None'}\n\nChoose a new folder?",
-                       ok="Choose", cancel="Keep") == 1:
-            folder = pick_folder_dialog()
-            if folder: s["folder"] = folder
-
-        self.session = s
-        save_json(CONFIG_FILE, s)
-        self._build_menu()
-        rumps.alert("✅ Session Saved",
-                    f"{s['sport']} vs {s['opponent']}  |  {s['videographer']}  |  {s['phase']}\n"
-                    f"Folder: {s['folder'] or 'Not set'}")
-
     def switch_sport(self, sport_key):
         old_sport = self.session.get("sport", "MBB")
         self._shortcuts_data[old_sport] = dict(self.shortcuts)
@@ -11725,15 +12528,13 @@ class BasketballRenamerApp(rumps.App):
 
         if snapshot["renames"]:
             # A batch rename gives clips a fresh name, so earlier tag records no longer apply
-            records = load_json(TAG_RECORDS_FILE, {})
+            records = load_tag_records(folder_path)
             for r in snapshot["renames"]:
                 old_record = records.pop(r["old"], None)
                 records.pop(r["new"], None)
                 if old_record:
                     r["record_before"] = old_record
-                    if old_record.get("reject"):
-                        records[r["new"]] = {"reject": True}   # a reject stays a reject
-            save_tag_records(records)
+            save_tag_records(records, folder_path)
             _max_stack = load_json(SETTINGS_FILE, DEFAULT_SETTINGS).get("undo_stack_size", 50)
             self._push_undo(snapshot, max_stack=_max_stack)
 
@@ -11969,11 +12770,11 @@ class BasketballRenamerApp(rumps.App):
             ok, err = SafeRenamer.safe_rename(src, dst, folder_path, self.session)
             if ok:
                 restored += 1
-                records = load_json(TAG_RECORDS_FILE, {})
+                records = load_tag_records(folder_path)
                 records.pop(r["new"], None)
                 if "record_before" in r:
                     records[r["old"]] = r["record_before"]
-                save_tag_records(records)
+                save_tag_records(records, folder_path)
                 if "tags_before" in r:
                     set_finder_tags(dst, r["tags_before"])
             else:
@@ -12007,7 +12808,7 @@ class BasketballRenamerApp(rumps.App):
             return 0
 
         folder_path = Path(folder)
-        records = load_json(TAG_RECORDS_FILE, {})
+        records = load_tag_records(folder_path)
         items, errors = [], []
         for p in paths:
             ok, result = SafeRenamer.safe_trash(p, folder_path, self.session)
@@ -12021,7 +12822,7 @@ class BasketballRenamerApp(rumps.App):
                 errors.append(f"  {p.name}: {result.replace(NO_TRASH_PREFIX, '')}")
 
         if items:
-            save_tag_records(records)
+            save_tag_records(records, folder_path)
             _max_stack = load_json(SETTINGS_FILE, DEFAULT_SETTINGS).get("undo_stack_size", 50)
             self._push_undo({
                 "type": "trash",
@@ -12061,7 +12862,7 @@ class BasketballRenamerApp(rumps.App):
             return
 
         restored, errors = 0, []
-        records = load_json(TAG_RECORDS_FILE, {})
+        records = load_tag_records(folder_path)
         for i in items:
             ok, err = SafeRenamer.safe_restore(
                 Path(i["trash_path"]), folder_path / i["name"], folder_path, self.session)
@@ -12071,7 +12872,7 @@ class BasketballRenamerApp(rumps.App):
                     records[i["name"]] = i["record_before"]
             else:
                 errors.append(f"  {i['name']}: {err}")
-        save_tag_records(records)
+        save_tag_records(records, folder_path)
 
         stack.pop()
         save_json(UNDO_FILE, stack)

@@ -86,7 +86,7 @@ All paths are in `~`; constants are at the top of `renamer.py`.
 | `.bball_renamer_v3_rosters_meta.json` | Roster cache timestamps, checked against `roster_cache_days` |
 | `.bball_renamer_v3_key_presets.json` | Named hotkey layouts per sport |
 | `.ezlogger/rename_log.json` | Permanent log of every rename attempt |
-| `.ezlogger/tag_records.json` | `{tagged_filename: {"base", "colors", "reject"}}`, so relabeling replaces old labels; `reject` marks clips to trash |
+| `.ezlogger/tag_records.json` | Per folder: `{"version": 2, "folders": {folder: {tagged_filename: {"base", "colors"}}}, "legacy": {...}}`, so relabeling replaces old labels. Old files may still hold a `reject` key from the removed reject feature; it's ignored |
 | `.ezlogger/crashes/` | Crash logs |
 | `Library/LaunchAgents/com.bball.renamer.plist` | Legacy login item from the removed "Launch at login" setting; `_remove_legacy_launch_agent` deletes it at launch |
 
@@ -113,7 +113,7 @@ NAV_ITEMS = [
 ]
 ```
 
-**First-run tutorial:** `TutorialOverlay` (NSView subclass defined in `make_objc_classes()`) draws a scrim with a `kCGBlendModeClear` spotlight cutout. `TUTORIAL_STEPS` is a list of `(target_ref_attr, title, body)` tuples. Methods on `TagWindowV2`: `_start_tutorial`, `_show_tutorial_step`, `_dismiss_tutorial`, `_auto_start_tutorial`. Stored view refs: `_tutorial_folder_row`, `_tutorial_convention_sv`, `_tutorial_url_btn`. The `seen_tutorial` boolean in `DEFAULT_SETTINGS` gates auto-start; Settings has a "Replay Tutorial" `ActionButton` that calls `_dismiss_tutorial()` then `_start_tutorial()`.
+**First-run tutorial:** `TutorialOverlay` (NSView subclass defined in `make_objc_classes()`) draws a scrim with a `kCGBlendModeClear` spotlight cutout. `TUTORIAL_STEPS` is a list of `(target_ref_attr, title, body)` tuples. Methods on `TagWindowV2`: `_start_tutorial`, `_show_tutorial_step`, `_dismiss_tutorial`, `_auto_start_tutorial`. Stored view refs: `_tutorial_folder_row` (the sidebar Folders panel), `_tutorial_convention_sv`, `_tutorial_url_btn`. The `seen_tutorial` boolean in `DEFAULT_SETTINGS` gates auto-start; Settings has a "Replay Tutorial" `ActionButton` that calls `_dismiss_tutorial()` then `_start_tutorial()`.
 
 ## Naming and filenames
 
@@ -125,14 +125,19 @@ Presets live in two buckets: `naming_presets` (global, from `+ New` and `Dup`) a
 
 **Batch Rename:** `_on_batch_rename` passes the Naming tab's selected clips (`_naming_selected`) to `batch_rename(_, only_names=...)`. An empty selection means the whole folder. After `batch_rename` or `undo_last`, call `_refresh_tag_window_files()`.
 
-**Staying in sync with Finder:** `_watch_folder` runs one FSEvents stream on the session folder (main run loop, default mode, 0.3 s latency, `WatchRoot` so a moved or deleted folder is noticed). It calls `_on_folder_changed`, as does `windowDidBecomeKey_` as a backup for network drives. `_start_folder_watch` runs after the window builds and after Choose Folder; reset `_file_inodes` whenever the folder changes. `_refresh_files(external=True)` returns early when the names are unchanged, so the app's own renames and Finder-tag writes cause no redraw.
+**Staying in sync with Finder:** `_watch_folder` runs one FSEvents stream on the session folder (main run loop, default mode, 0.3 s latency, `WatchRoot` so a moved or deleted folder is noticed). It calls `_on_folder_changed`, as does `windowDidBecomeKey_` as a backup for network drives. `_start_folder_watch` runs after the window builds and in `switch_folder`; reset `_file_inodes` whenever the folder changes. `_refresh_files(external=True)` returns early when the names are unchanged, so the app's own renames and Finder-tag writes cause no redraw.
 - `_refresh_files` keeps the selection **by clip, not by row**: `pick_selection` follows the name, or the inode through a rename (`match_renames`). Finalize renames `self._files[self._selected_file_idx]`, so a row-based selection would rename the wrong clip once Finder adds or removes files.
 - Finder renames carry tag records to the new name (`move_records_for_renames`) and update `_naming_selected`.
 - `_follow_selected_clip` keeps a log going when its clip is renamed and cancels it, with a hint, when the clip is deleted.
 - While `_quiet_select` is set, `_on_file_selected` only stores the index; `_refresh_files` uses it to restore the selection without re-arming a log or reloading the thumbnail.
 - `setup.py` lists `FSEvents` and `CoreFoundation`. Without them the built app silently falls back to the focus refresh.
 
-**Move to Trash:** `BasketballRenamerApp.trash_clips(paths, folder)` confirms with `_confirm_trash_alert` (Return is Cancel), calls `safe_trash` for each clip, drops their tag records and pushes a `{"type": "trash", "items": [{name, trash_path, record_before}]}` undo entry. `undo_last` sends that type to `_undo_trash`, and `undo_op_available` decides whether any entry can still be undone. The Naming tab's trash button acts on `trash_targets(files, _naming_selected, _rejected)`: the selection, else the rejects. ⌘⌫ in its Clips list acts on the selection only. `_refresh_files` rebuilds `_rejected` from tag records, and `_style_reject_cell` strikes those rows through in both file lists. A reject survives Batch Rename; logging the clip clears it.
+**Folder browsing:** every folder change goes through `TagWindowV2.switch_folder(path)`, which refuses while a log is in progress, resets the selection, `_file_inodes` and `_naming_selected`, saves the session folder and `recent_folders`, and restarts the folder watch. Back/forward live in `FolderHistory`. The sidebar Folders panel (`_build_folders_panel`, `_rebuild_folder_tree`, rows are `FolderRowView`, drops go to `FolderPanelView`) lists `favorite_folders` and a tree from `folder_roots()`; subfolders and clip counts load off the main thread (`_folder_tree_load`), so a slow NAS never blocks. The path bar sits in the top bar's left side (`_layout_path_bar`, rebuilt by `_reposition_layout`). `_install_folder_nav_monitor` handles ⌘[ ⌘] ⌘↑ ⌘← ⌘→ like the ⌘Z monitor. The tree is read-only: never move, rename or delete folders from it. Its last row, "Other Folder…", opens the system picker (`_session_choose_folder`) for folders outside the tree; the Naming tab no longer has a folder row, and the empty-state "Open Folder" button only shows when there is no usable folder.
+- Synthetic clicks in the top 32 px (transparent title bar) go to the title bar; test top-bar controls by clicking their lower half.
+
+**Tag records are per folder:** `load_tag_records(folder)` / `save_tag_records(records, folder)`. The file is `{"version": 2, "folders": {folder_key: {name: record}}, "legacy": {...}}`; old filename-only entries sit in `legacy` until a folder holding that name claims them. Always pass the clip's folder.
+
+**Move to Trash:** `BasketballRenamerApp.trash_clips(paths, folder)` confirms with `_confirm_trash_alert` (Return is Cancel), calls `safe_trash` for each clip, drops their tag records and pushes a `{"type": "trash", "items": [{name, trash_path, record_before}]}` undo entry. `undo_last` sends that type to `_undo_trash`, and `undo_op_available` decides whether any entry can still be undone. The Naming tab's trash button and ⌘⌫ in its Clips list act on the selection (`_naming_selected`); in Log Mode, ⌘⌫ and the right-click menu act on the selected clips. (There used to be a reject mark, X in Log Mode; it was removed on purpose, so don't bring it back.)
 
 ## Sports
 
@@ -160,7 +165,6 @@ Flow: `handle_key` → `_handle_shortcut_key_v2` → ENTER → `_advance_step_v2
 | ⌥ Option | Toggles custom text mode; spaces are kept as typed |
 | ESC | Closes search first, otherwise cancels the log |
 | TAB | Next file, only when no step is active; doesn't wrap |
-| X | `_toggle_reject_current`: marks or unmarks a reject, only when no step is active; marking moves to the next file |
 | ⌘⌫ | `_trash_current_clip`, only when no step is active. `KeyTableView.keyDown_` catches it, since `handle_key` gets no modifiers |
 
 - **Stats:** by step identity, not position. `stat_segments` splits a clip at chain boundaries (dropping custom text, and sharing labels picked before Player with every chained player); `stat_rows_for_segment` gives one row per player: player from the Player step, rating from the sport's last non-player step, play from the other steps, plus a `steps` dict of per-step values stored by `log_stat`.

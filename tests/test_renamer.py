@@ -564,7 +564,7 @@ def test_added_suffix_counts_as_a_duplicate():
     assert renamer.batch_base_stem("MBB_.mp4", False) == renamer.batch_base_stem("MBB__2.mp4", True)
 
 
-# ── Rejects and Move to Trash ─────────────────────────────────────────────────
+# ── Move to Trash ─────────────────────────────────────────────────────────
 
 @pytest.fixture
 def quiet_log(tmp_path):
@@ -581,35 +581,6 @@ def _fake_trash(trash_dir):
     return fn
 
 
-def test_set_reject_marks_and_unmarks_without_losing_base():
-    records = {"a.mp4": {"base": "A", "colors": []}}
-    renamer.set_reject(records, "a.mp4", True)
-    assert records["a.mp4"] == {"base": "A", "colors": [], "reject": True}
-    renamer.set_reject(records, "a.mp4", False)
-    assert records["a.mp4"] == {"base": "A", "colors": []}
-
-
-def test_set_reject_drops_empty_record():
-    records = {}
-    renamer.set_reject(records, "b.mp4", True)
-    assert records == {"b.mp4": {"reject": True}}
-    renamer.set_reject(records, "b.mp4", False)
-    assert records == {}
-
-
-def test_rejected_names_only_lists_present_clips():
-    records = {"a.mp4": {"reject": True}, "gone.mp4": {"reject": True},
-               "c.mp4": {"base": "C"}}
-    assert renamer.rejected_names(records, {"a.mp4", "c.mp4"}) == {"a.mp4"}
-
-
-def test_trash_targets_prefers_selection_then_rejects():
-    files = [Path("/f/a.mp4"), Path("/f/b.mp4"), Path("/f/c.mp4")]
-    assert [f.name for f in renamer.trash_targets(files, {"b.mp4"}, {"c.mp4"})] == ["b.mp4"]
-    assert [f.name for f in renamer.trash_targets(files, set(), {"c.mp4"})] == ["c.mp4"]
-    assert renamer.trash_targets(files, set(), set()) == []
-
-
 def test_follow_multi_selection_keeps_clips_through_renames_and_removals():
     names = ["a.mp4", "B_new.mp4", "d.mp4"]
     # b was renamed in Finder, c was deleted; lead row stays selected
@@ -617,11 +588,6 @@ def test_follow_multi_selection_keeps_clips_through_renames_and_removals():
         names, ["a.mp4", "b.mp4", "c.mp4"], {"b.mp4": "B_new.mp4"}, 2)
     assert rows == [0, 1, 2]
     assert renamer.follow_multi_selection(names, ["gone.mp4"], {}, -1) == []
-
-
-def test_reject_toggle_target_marks_unless_all_already_rejects():
-    assert renamer.reject_toggle_target(["a", "b"], {"a"}) is True
-    assert renamer.reject_toggle_target(["a", "b"], {"a", "b"}) is False
 
 
 def test_trash_confirm_text_lists_five_then_counts_rest():
@@ -786,7 +752,7 @@ def test_trash_clips_and_undo_restore_records(tmp_path, quiet_log):
     b = folder / "b.mp4"; b.touch()
     records_file = tmp_path / "records.json"
     records_file.write_text(renamer.json.dumps(
-        {"a.mp4": {"base": "A", "reject": True}, "b.mp4": {"base": "B"}}))
+        {"a.mp4": {"base": "A", "colors": ["Red"]}, "b.mp4": {"base": "B"}}))
     undo_file = tmp_path / "undo.json"
     app = _trash_app(tmp_path)
     with patch.multiple(renamer, TAG_RECORDS_FILE=str(records_file),
@@ -796,15 +762,15 @@ def test_trash_clips_and_undo_restore_records(tmp_path, quiet_log):
          patch.object(renamer.rumps, "alert", MagicMock(return_value=True), create=True):
         assert app.trash_clips([a], folder, confirm=False) == 1
         assert not a.exists() and (trash / "a.mp4").exists()
-        records = renamer.json.loads(records_file.read_text())
+        records = renamer.load_tag_records(folder)
         assert "a.mp4" not in records and "b.mp4" in records
         stack = renamer.json.loads(undo_file.read_text())
         assert stack[-1]["type"] == "trash"
 
         app.undo_last(None)
         assert a.exists() and not (trash / "a.mp4").exists()
-        records = renamer.json.loads(records_file.read_text())
-        assert records["a.mp4"] == {"base": "A", "reject": True}
+        records = renamer.load_tag_records(folder)
+        assert records["a.mp4"] == {"base": "A", "colors": ["Red"]}
         assert renamer.json.loads(undo_file.read_text()) == []
 
 
@@ -839,10 +805,10 @@ def test_match_renames_ignores_name_swaps_onto_existing_names():
     assert renamer.match_renames(old, new) == {}
 
 
-def test_move_records_for_renames_keeps_labels_and_rejects():
-    records = {"b.mp4": {"base": "B", "colors": ["Red"], "reject": True}}
+def test_move_records_for_renames_keeps_labels():
+    records = {"b.mp4": {"base": "B", "colors": ["Red"]}}
     assert renamer.move_records_for_renames(records, {"b.mp4": "b2.mp4"})
-    assert records == {"b2.mp4": {"base": "B", "colors": ["Red"], "reject": True}}
+    assert records == {"b2.mp4": {"base": "B", "colors": ["Red"]}}
 
 
 def test_move_records_for_renames_never_overwrites():
@@ -1275,3 +1241,108 @@ def test_remove_legacy_launch_agent_deletes_old_login_item(tmp_path):
 
 def test_launch_at_login_setting_is_gone():
     assert "launch_at_login" not in renamer.DEFAULT_SETTINGS
+
+
+# ── Folder browsing and per-folder tag records ────────────────────────────────
+
+def test_tag_records_are_kept_per_folder(tmp_path):
+    a = tmp_path / "game1"; a.mkdir()
+    b = tmp_path / "game2"; b.mkdir()
+    with patch.object(renamer, "TAG_RECORDS_FILE", str(tmp_path / "records.json")):
+        renamer.save_tag_records({"C0001.MP4": {"base": "C0001"}}, a)
+        assert renamer.load_tag_records(a) == {"C0001.MP4": {"base": "C0001"}}
+        assert renamer.load_tag_records(b) == {}       # same camera name, other card
+        renamer.save_tag_records({}, a)
+        assert renamer.load_tag_records(a) == {}
+
+
+def test_old_flat_records_move_to_the_folder_holding_the_clip(tmp_path):
+    a = tmp_path / "game1"; a.mkdir(); (a / "X_LAYUP.mp4").touch()
+    b = tmp_path / "game2"; b.mkdir()
+    rf = tmp_path / "records.json"
+    rf.write_text(renamer.json.dumps({"X_LAYUP.mp4": {"base": "X"},
+                                      "GONE.mp4": {"base": "G"}}))
+    with patch.object(renamer, "TAG_RECORDS_FILE", str(rf)):
+        assert renamer.load_tag_records(b) == {}
+        assert renamer.load_tag_records(a) == {"X_LAYUP.mp4": {"base": "X"}}
+        data = renamer.json.loads(rf.read_text())
+        assert data["version"] == 2
+        assert data["legacy"] == {"GONE.mp4": {"base": "G"}}   # claimed once, not twice
+        assert renamer.load_tag_records(b) == {}
+
+
+def test_list_subfolders_skips_hidden_packages_and_files(tmp_path):
+    for n in ("Game 10", "Game 2", ".hidden", "Proj.fcpbundle", "game 1"):
+        (tmp_path / n).mkdir()
+    (tmp_path / "clip.mp4").touch()
+    names = [p.name for p in renamer.list_subfolders(tmp_path)]
+    assert names == ["game 1", "Game 2", "Game 10"]
+    assert renamer.list_subfolders(tmp_path / "missing") == []
+
+
+def test_count_clips_counts_top_level_videos_only(tmp_path):
+    (tmp_path / "a.mp4").touch(); (tmp_path / "b.MOV").touch()
+    (tmp_path / ".c.mp4").touch(); (tmp_path / "notes.txt").touch()
+    (tmp_path / "sub").mkdir(); (tmp_path / "sub" / "d.mp4").touch()
+    assert renamer.count_clips(tmp_path) == 2
+    assert renamer.count_clips(tmp_path / "missing") == 0
+
+
+def test_recent_and_favorite_folders():
+    r = renamer.add_recent_folder(["/a", "/b"], "/b/")
+    assert r == ["/b", "/a"]
+    r = renamer.add_recent_folder([f"/{i}" for i in range(10)], "/new")
+    assert len(r) == 10 and r[0] == "/new" and "/9" not in r
+    favs = renamer.toggle_favorite([], "/x")
+    assert favs == ["/x"] and renamer.is_favorite(favs, "/x/")
+    assert renamer.toggle_favorite(favs, "/x") == []
+
+
+def test_folder_history_back_and_forward():
+    h = renamer.FolderHistory()
+    h.visit("/a")            # /a -> /b
+    h.visit("/b")            # /b -> /c
+    assert h.back("/c") == "/b"
+    assert h.back("/b") == "/a"
+    assert not h.can_back() and h.can_forward()
+    assert h.forward("/a") == "/b"
+    h.visit("/b")            # a new folder clears forward
+    assert not h.can_forward()
+
+
+def test_folder_breadcrumbs(tmp_path):
+    crumbs = renamer.folder_breadcrumbs("/Volumes/NAS/Hockey/Game 1", home="/Users/me")
+    assert [l for l, _ in crumbs] == ["NAS", "Hockey", "Game 1"]
+    crumbs = renamer.folder_breadcrumbs("/Users/me/Movies/Clips", home="/Users/me")
+    assert [l for l, _ in crumbs] == ["Home", "Movies", "Clips"]
+    assert crumbs[-1][1] == Path("/Users/me/Movies/Clips")
+    crumbs = renamer.folder_breadcrumbs("/tmp/x", home="/Users/me")
+    assert [l for l, _ in crumbs] == ["Mac", "tmp", "x"]
+
+
+def test_neighbor_folder(tmp_path):
+    for n in ("Game 1", "Game 2", "Game 10"):
+        (tmp_path / n).mkdir()
+    g2 = tmp_path / "Game 2"
+    assert renamer.neighbor_folder(g2, 1) == tmp_path / "Game 10"
+    assert renamer.neighbor_folder(g2, -1) == tmp_path / "Game 1"
+    assert renamer.neighbor_folder(tmp_path / "Game 10", 1) is None
+
+
+def test_tree_ancestors(tmp_path):
+    root = tmp_path / "NAS"
+    deep = root / "Hockey" / "2026" / "Game 1"
+    assert renamer.tree_ancestors(deep, [root]) == [
+        renamer.folder_key(root), renamer.folder_key(root / "Hockey"),
+        renamer.folder_key(root / "Hockey" / "2026")]
+    assert renamer.tree_ancestors(root, [root]) == []
+    assert renamer.tree_ancestors("/elsewhere/x", [root]) == []
+
+
+def test_folder_roots_lists_volumes_but_not_startup_disk(tmp_path):
+    home = tmp_path / "home"; (home / "Movies").mkdir(parents=True)
+    vols = tmp_path / "Volumes"; vols.mkdir()
+    (vols / "NAS").mkdir()
+    (vols / "Macintosh HD").symlink_to("/")
+    roots = renamer.folder_roots(home=home, volumes_dir=str(vols))
+    assert [r[0] for r in roots] == ["Movies", "NAS"]
