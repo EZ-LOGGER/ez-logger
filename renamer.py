@@ -982,6 +982,9 @@ def sort_file_entries(entries, sort, info_for=lambda path, st: None):
     return [e for _v, e in known] + [e for _v, e in unknown]
 
 
+# NSTextAlignment values on Apple Silicon (arm64): Left 0, Center 1, Right 2.
+# The old Intel values had Center and Right swapped, so never write the number.
+ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT = 0, 1, 2
 FILE_LIST_MIN_W   = 160    # narrowest the Log Mode file list gets
 FILE_LIST_NAME_MIN = 170   # keep at least this much for clip names before dropping info columns
 CARDS_MIN_TOTAL   = 440    # Log Mode cards' minimum width (400) plus their side margins
@@ -3327,7 +3330,7 @@ class TagWindowV2:
             display   = label[:max_chars] if len(label) > max_chars else label
             step_lbl  = NSTextField.labelWithString_(display)
             step_lbl.setFont_(NSFont.systemFontOfSize_(10 * sc))
-            step_lbl.setAlignment_(2)
+            step_lbl.setAlignment_(ALIGN_CENTER)
             lbl_w = circle_d + min(60 * sc, gap - 10 * sc)
             step_lbl.setFrame_(NSMakeRect(
                 x - (lbl_w - circle_d) / 2, circles_y - lbl_drop, lbl_w, lbl_h))
@@ -3465,7 +3468,7 @@ class TagWindowV2:
         self._placeholder_title.setDrawsBackground_(False)
         self._placeholder_title.setEditable_(False)
         self._placeholder_title.setSelectable_(False)
-        self._placeholder_title.setAlignment_(2)
+        self._placeholder_title.setAlignment_(ALIGN_CENTER)
         self._placeholder_title.setFont_(NSFont.systemFontOfSize_(24))
         self._placeholder_title.setTextColor_(NSColor.labelColor())
         self._placeholder_title.setAutoresizingMask_(2 | 8 | 32)
@@ -3480,7 +3483,7 @@ class TagWindowV2:
         self._placeholder_sub.setDrawsBackground_(False)
         self._placeholder_sub.setEditable_(False)
         self._placeholder_sub.setSelectable_(False)
-        self._placeholder_sub.setAlignment_(2)
+        self._placeholder_sub.setAlignment_(ALIGN_CENTER)
         self._placeholder_sub.setFont_(NSFont.systemFontOfSize_(13))
         self._placeholder_sub.setTextColor_(NSColor.secondaryLabelColor())
         self._placeholder_sub.setAutoresizingMask_(2 | 8 | 32)
@@ -3785,6 +3788,10 @@ class TagWindowV2:
             else:
                 self._set_cards_for_step(None)
                 self._set_active_shortcut_card("players")
+                # The window may have resized while another section was showing;
+                # refit the card on screen to the current width and height.
+                if self._sc_current_bank in getattr(self, "_sc_scrollviews", {}):
+                    self._populate_shortcut_pills(self._sc_current_bank)
         if hasattr(self, "_players_section"):
             self._players_section.setHidden_(not is_players)
         if hasattr(self, "_labels_section"):
@@ -3930,7 +3937,7 @@ class TagWindowV2:
         self._now_filename.setDrawsBackground_(False)
         self._now_filename.setEditable_(False)
         self._now_filename.setSelectable_(False)
-        self._now_filename.setAlignment_(2)
+        self._now_filename.setAlignment_(ALIGN_CENTER)
         self._now_filename.setFont_(
             NSFont.monospacedSystemFontOfSize_weight_(12, 0))
         self._now_filename.setTextColor_(NSColor.labelColor())
@@ -3964,7 +3971,7 @@ class TagWindowV2:
         self._now_tag_preview.setFont_(
             NSFont.monospacedSystemFontOfSize_weight_(13, 0.3))
         self._now_tag_preview.setTextColor_(_hex_color("#dbcca6"))
-        self._now_tag_preview.setAlignment_(2)
+        self._now_tag_preview.setAlignment_(ALIGN_CENTER)
         card.addSubview_(self._now_tag_preview)
 
         # Step circles — dynamic, stored so _build_step_circles can rebuild them
@@ -3985,7 +3992,7 @@ class TagWindowV2:
         hint.setSelectable_(False)
         hint.setFont_(NSFont.systemFontOfSize_(11))
         hint.setTextColor_(NSColor.secondaryLabelColor())
-        hint.setAlignment_(2)
+        hint.setAlignment_(ALIGN_CENTER)
         card.addSubview_(hint)
         self._now_hint = hint
 
@@ -4312,6 +4319,7 @@ class TagWindowV2:
             self._populate_shortcut_pills(bank)
 
         self._sc_current_bank = self._steps[0]
+        self._populate_shortcut_pills(self._sc_current_bank)   # its height wins now
         self._set_active_shortcut_card(self._steps[0])
 
     # ── Tagging key handling ──────────────────────────────────────────────────
@@ -5328,8 +5336,8 @@ class TagWindowV2:
                 cell.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(self._density()[2], 0.0))
                 cell.setTextColor_(NSColor.secondaryLabelColor())
                 if right:
-                    cell.setAlignment_(1)              # NSTextAlignmentRight
-                    col.headerCell().setAlignment_(1)
+                    cell.setAlignment_(ALIGN_RIGHT)
+                    col.headerCell().setAlignment_(ALIGN_RIGHT)
                 table.addTableColumn_(col)
             want_header = bool(shown)
             if want_header and table.headerView() is None:
@@ -5573,23 +5581,31 @@ class TagWindowV2:
 
         mid = scroll_h / 2
 
+        # Labels span the full width with centered text, so they stay centered and
+        # never clip at any width. The button keeps a fixed width; flexible side
+        # margins center it. Width-sizable controls stretch off-center (their
+        # titles don't follow), so nothing here but the labels may use mask 2.
+        CENTER_LABEL = 2 | 8 | 32     # width sizable + flexible top/bottom
+        CENTER_FIXED = 1 | 4 | 8 | 32 # all margins flexible, size fixed
+
         icon = NSTextField.labelWithString_("📁")
         icon.setFont_(NSFont.systemFontOfSize_(32))
-        icon.setAlignment_(2)   # NSTextAlignmentCenter
+        icon.setAlignment_(ALIGN_CENTER)
         icon.sizeToFit()
         isz = icon.frame().size
-        icon.setFrame_(NSMakeRect((FILE_LIST_W - isz.width) / 2, mid + 20, isz.width, isz.height))
-        icon.setAutoresizingMask_(1 | 4 | 2 | 8)   # all margins flexible → stays centered
+        icon.setFrame_(NSMakeRect(0, mid + 20, FILE_LIST_W, isz.height))
+        icon.setAutoresizingMask_(CENTER_LABEL)
         ov.addSubview_(icon)
 
         msg = NSTextField.labelWithString_("No folder selected")
         msg.setFont_(NSFont.systemFontOfSize_(12))
         msg.setTextColor_(NSColor.labelColor())
-        msg.setAlignment_(2)
+        msg.setAlignment_(ALIGN_CENTER)
+        msg.setLineBreakMode_(4)    # NSLineBreakByTruncatingTail
         msg.sizeToFit()
         msz = msg.frame().size
-        msg.setFrame_(NSMakeRect((FILE_LIST_W - msz.width) / 2, mid - 6, msz.width, msz.height))
-        msg.setAutoresizingMask_(1 | 4 | 2 | 8)
+        msg.setFrame_(NSMakeRect(8, mid - 6, FILE_LIST_W - 16, msz.height))
+        msg.setAutoresizingMask_(CENTER_LABEL)
         ov.addSubview_(msg)
 
         btn_w, btn_h = 140, 28
@@ -5597,7 +5613,7 @@ class TagWindowV2:
             NSMakeRect((FILE_LIST_W - btn_w) / 2, mid - 50, btn_w, btn_h))
         btn.configureTitle_bg_press_action_(
             "Open Folder", COLOR_CRIMSON, "#6b1a26", self._session_choose_folder)
-        btn.setAutoresizingMask_(1 | 4 | 2 | 8)
+        btn.setAutoresizingMask_(CENTER_FIXED)
         ov.addSubview_(btn)
 
         self._empty_state_overlay = ov
@@ -5908,9 +5924,12 @@ class TagWindowV2:
             card_origin_y = card_top - actual_h
             card.setFrame_(NSMakeRect(cf.origin.x, card_origin_y, cf.size.width, actual_h))
             sv.setFrame_(NSMakeRect(12, 14, sv_w, actual_sv_h))
-            # Keep _sc_card_h in sync so _reposition_layout uses the correct height
-            self._sc_card_h = actual_h
-            if hasattr(self, "_sc_card_h_resizer"):
+            # Keep _sc_card_h in sync so _reposition_layout uses the correct height.
+            # Every card shares it, so only the card on screen may set it; otherwise
+            # filling the hidden banks in a loop leaves the last bank's height on all.
+            if bank == getattr(self, "_sc_current_bank", bank):
+                self._sc_card_h = actual_h
+            if bank == getattr(self, "_sc_current_bank", bank) and hasattr(self, "_sc_card_h_resizer"):
                 self._sc_card_h_resizer.setFrame_(
                     NSMakeRect(cf.origin.x, card_origin_y - 12, cf.size.width, 12))
         else:
@@ -5997,7 +6016,7 @@ class TagWindowV2:
                 num_lbl = NSTextField.labelWithString_(f"#{sc['number']}")
                 num_lbl.setFont_(NSFont.monospacedSystemFontOfSize_weight_(11, 0.3))
                 num_lbl.setTextColor_(_hex_color_alpha(COLOR_TAN, 0.65))
-                num_lbl.setAlignment_(2)  # NSTextAlignmentRight
+                num_lbl.setAlignment_(ALIGN_RIGHT)
                 num_lbl.setFrame_(NSMakeRect(col_w - 6 - NUM_W, (PILL_H - label_h) / 2, NUM_W, label_h))
                 pill.addSubview_(num_lbl)
 
@@ -6008,7 +6027,7 @@ class TagWindowV2:
             msg1 = NSTextField.labelWithString_("No players in roster")
             msg1.setFont_(NSFont.systemFontOfSize_(12))
             msg1.setTextColor_(NSColor.labelColor())
-            msg1.setAlignment_(2)
+            msg1.setAlignment_(ALIGN_CENTER)
             msg1.sizeToFit()
             m1sz = msg1.frame().size
             msg1.setFrame_(NSMakeRect(
@@ -6018,7 +6037,7 @@ class TagWindowV2:
             msg2 = NSTextField.labelWithString_("Team tab → Fetch Rosters or + Add Player")
             msg2.setFont_(NSFont.systemFontOfSize_(10))
             msg2.setTextColor_(NSColor.secondaryLabelColor())
-            msg2.setAlignment_(2)
+            msg2.setAlignment_(ALIGN_CENTER)
             msg2.sizeToFit()
             m2sz = msg2.frame().size
             msg2.setFrame_(NSMakeRect(
@@ -6785,7 +6804,7 @@ class TagWindowV2:
                 "No players yet — click \"+ Add Player\" or \"Fetch All Rosters ↓\" above.")
             empty.setFont_(NSFont.systemFontOfSize_(14))
             empty.setTextColor_(NSColor.tertiaryLabelColor())
-            empty.setAlignment_(2)
+            empty.setAlignment_(ALIGN_CENTER)
             empty.setFrame_(NSMakeRect(PAD, (container_h - 22) / 2, cw - PAD * 2, 22))
             container.addSubview_(empty)
             return
@@ -6843,7 +6862,7 @@ class TagWindowV2:
                 num_lbl.setFont_(NSFont.monospacedSystemFontOfSize_weight_(
                     max(9.0, font_size - 2), 0.3))
                 num_lbl.setTextColor_(_hex_color_alpha(COLOR_TAN, 0.6))
-                num_lbl.setAlignment_(2)
+                num_lbl.setAlignment_(ALIGN_RIGHT)
                 num_x = pill_w - 70 - NUM_W
                 num_lbl.setFrame_(NSMakeRect(num_x, (PILL_H - lbl_h) / 2, NUM_W, lbl_h))
                 pill.addSubview_(num_lbl)
@@ -7529,7 +7548,7 @@ class TagWindowV2:
                 lock_lbl = NSTextField.labelWithString_("ROSTER · TEAM TAB")
                 lock_lbl.setFont_(NSFont.systemFontOfSize_(10))
                 lock_lbl.setTextColor_(NSColor.tertiaryLabelColor())
-                lock_lbl.setAlignment_(2)  # right
+                lock_lbl.setAlignment_(ALIGN_RIGHT)
                 lock_lbl.setFrame_(NSMakeRect(FORM_W - ctrl_block_w - 130,
                                               (ROW_H - 14) / 2, 120, 14))
                 row.addSubview_(lock_lbl)
@@ -7776,7 +7795,7 @@ class TagWindowV2:
                 f'No {step_lbl.lower()} shortcuts yet — click "+ Add Shortcut" above.')
             empty.setFont_(NSFont.systemFontOfSize_(14))
             empty.setTextColor_(NSColor.tertiaryLabelColor())
-            empty.setAlignment_(2)
+            empty.setAlignment_(ALIGN_CENTER)
             empty.setFrame_(NSMakeRect(PAD, (container_h - 22) / 2, cw - PAD * 2, 22))
             container.addSubview_(empty)
             sv.documentView().scrollPoint_((0, 0))
@@ -10135,7 +10154,7 @@ class TagWindowV2:
         count_lbl.setFont_(NSFont.monospacedSystemFontOfSize_weight_(12, 0.4))
         count_lbl.setTextColor_(NSColor.secondaryLabelColor())
         count_lbl.setFrame_(NSMakeRect(w - 48, (ROW_H - 16) / 2, 48, 16))
-        count_lbl.setAlignment_(2)
+        count_lbl.setAlignment_(ALIGN_RIGHT)
         row.addSubview_(count_lbl)
         parent.addSubview_(row)
 
@@ -10226,7 +10245,7 @@ class TagWindowV2:
             count_lbl.setFont_(NSFont.monospacedSystemFontOfSize_weight_(13, 0.4))
             count_lbl.setTextColor_(NSColor.secondaryLabelColor())
             count_lbl.setFrame_(NSMakeRect(pw - 72, (ROW_H - 16) / 2, 68, 16))
-            count_lbl.setAlignment_(2)
+            count_lbl.setAlignment_(ALIGN_RIGHT)
             row.addSubview_(count_lbl)
 
             t = MenuTarget.alloc().init()
@@ -10477,7 +10496,7 @@ class TagWindowV2:
             pill_lbl = NSTextField.labelWithString_(f"{cur_label}  ▾")
             pill_lbl.setFont_(NSFont.systemFontOfSize_(12))
             pill_lbl.setTextColor_(NSColor.labelColor())
-            pill_lbl.setAlignment_(2)
+            pill_lbl.setAlignment_(ALIGN_CENTER)
             pill_lbl.setFrame_(NSMakeRect(4, (BTN_H - 16) / 2, DD_W - 8, 16))
             pill.addSubview_(pill_lbl)
 
@@ -10531,7 +10550,7 @@ class TagWindowV2:
             val_lbl = NSTextField.labelWithString_(str(int(cur_val)))
             val_lbl.setFont_(NSFont.monospacedSystemFontOfSize_weight_(13, 0.3))
             val_lbl.setTextColor_(NSColor.labelColor())
-            val_lbl.setAlignment_(2)
+            val_lbl.setAlignment_(ALIGN_CENTER)
             val_lbl.setFrame_(NSMakeRect(ctl_x + STEP_W + G, ctl_y + (BTN_H - 16) / 2, VAL_W, 16))
             plus_btn = ActionButton.alloc().initWithFrame_(
                 NSMakeRect(ctl_x + STEP_W + G + VAL_W + G, ctl_y, STEP_W, BTN_H))
