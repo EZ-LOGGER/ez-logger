@@ -40,7 +40,7 @@ gh release create vX.X.X "dist/EZLogger-X.X.X.dmg" --title "EZ Logger vX.X.X" --
 
 - Everything requires Homebrew Python 3.11 at `/opt/homebrew/bin/python3.11`.
 - `--sign` needs the Developer ID Application certificate (`3XQ36X2RC9`) and the Keychain notarize profile `ez-logger-notarize`. It signs nested `.so`, `.dylib`, Python binaries **and Sparkle's plain `Autoupdate` binary** individually, because `--deep` alone fails notarization.
-- `--sign` notarizes and staples the **app**. The DMG around it is not signed or stapled.
+- `--sign` notarizes and staples the **app**, then signs, notarizes and staples the **DMG**, then runs `generate_appcast`. Keep that order: stapling rewrites the DMG, and the appcast stores its size and Sparkle signature.
 - The preview server only watches `renamer.py`. Touch it to reload after editing `preview.html`, which mirrors the AppKit layout in HTML/CSS. It needs `watchdog` for instant reloads and otherwise polls every second.
 
 **Distribution target:** Apple Silicon only. In practice the build requires **macOS 26**: in the v1.0.2 DMG, 61 of 87 bundled binaries declare a minimum of 26.0 because they come from Homebrew Python, and `setup.py` sets no `LSMinimumSystemVersion`. Supporting older macOS would need a different Python build.

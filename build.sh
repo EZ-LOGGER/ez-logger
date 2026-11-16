@@ -161,6 +161,37 @@ if [ "$SIGN" = true ]; then
     echo "✅ DMG created: $DMG_PATH"
     echo ""
 
+    # The DMG is signed, notarized and stapled too, so it's verified before it
+    # even opens. This must finish before generate_appcast: stapling rewrites
+    # the file, and the appcast records its size and Sparkle signature.
+    echo "🔏 Signing the DMG..."
+    codesign --force --sign "$SIGN_ID" --timestamp "$DMG_PATH"
+    echo "✅ Signed."
+    echo ""
+
+    echo "📤 Submitting the DMG to Apple for notarization..."
+    echo "   (This takes 1-5 minutes)"
+    DMG_NOTARY_OUT=$(xcrun notarytool submit "$DMG_PATH" \
+      --keychain-profile "$KEYCHAIN_PROFILE" \
+      --wait 2>&1) || true
+    echo "$DMG_NOTARY_OUT" | tail -4
+    if ! echo "$DMG_NOTARY_OUT" | grep -q "status: Accepted"; then
+        echo "❌ Apple did not accept the DMG. See why with:"
+        echo "   xcrun notarytool log <submission id> --keychain-profile $KEYCHAIN_PROFILE"
+        exit 1
+    fi
+    echo ""
+
+    echo "📎 Stapling the DMG..."
+    xcrun stapler staple "$DMG_PATH"
+    if ! spctl -a -t open --context context:primary-signature "$DMG_PATH" 2>/dev/null; then
+        echo "❌ Gatekeeper does not accept the stapled DMG."
+        spctl -a -t open --context context:primary-signature -vv "$DMG_PATH" 2>&1 | sed 's/^/     /'
+        exit 1
+    fi
+    echo "✅ DMG notarized and stapled."
+    echo ""
+
     echo "📋 Generating appcast.xml..."
     ./Sparkle/bin/generate_appcast \
       --download-url-prefix "https://github.com/EZ-LOGGER/ez-logger/releases/download/v${APP_VERSION}/" \
