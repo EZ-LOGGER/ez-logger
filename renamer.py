@@ -23,7 +23,7 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from datetime import datetime
 
-APP_VERSION = "1.0.13"
+APP_VERSION = "1.0.14"
 
 CRASH_LOG_DIR  = os.path.expanduser("~/.ezlogger/crashes")
 CRASH_EMAIL_TO = "zachjkeding@gmail.com"
@@ -1762,6 +1762,19 @@ def list_subfolders(folder):
         return []
     out.sort(key=lambda p: natural_key(p.name))
     return out
+
+
+def is_local_volume(path):
+    """False for a network share (SMB, AFP, NFS, WebDAV). Touches the disk, so
+    call it off the main thread. Unknown counts as network, which only means the
+    folder is re-checked on a timer."""
+    try:
+        from Foundation import NSURL
+        url = NSURL.fileURLWithPath_(str(path))
+        ok, val, _err = url.getResourceValue_forKey_error_(None, "NSURLVolumeIsLocalKey", None)
+        return bool(ok and val)
+    except Exception:
+        return False
 
 
 def count_clips(folder, cap=9999):
@@ -5587,6 +5600,22 @@ class TagWindowV2:
         self._apply_info_columns()
 
         self._build_empty_state_overlay(panel, FILE_LIST_W, panel_h)
+
+        # Folders inside the current one, listed above its clips; a click opens one
+        sub_sv = NSScrollView.alloc().initWithFrame_(
+            NSMakeRect(0, panel_h - HEADER_STRIP_H, FILE_LIST_W, 0))
+        sub_sv.setHasVerticalScroller_(True)
+        sub_sv.setAutohidesScrollers_(True)
+        sub_sv.setBorderType_(0)
+        sub_sv.setDrawsBackground_(False)
+        sub_sv.setAutoresizingMask_(2 | 8)   # width sizable, pinned to the top
+        sub_sv.setDocumentView_(FlippedView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, FILE_LIST_W, 10)))
+        sub_sv.setHidden_(True)
+        panel.addSubview_(sub_sv)
+        self._clip_subfolders_sv  = sub_sv
+        self._clip_subfolders_sig = None
+
         self._refresh_files()
         self.win.makeFirstResponder_(table)
 
@@ -5919,6 +5948,103 @@ class TagWindowV2:
         self._empty_state_overlay = ov
         self._empty_state_msg     = msg
 
+    _SUBFOLDER_ROW_H    = 26.0
+    _SUBFOLDER_MAX_ROWS = 4
+
+    def _layout_clip_subfolders(self):
+        """List the current folder's subfolders above its clips in the Video Files
+        panel, like Finder. Uses the folder tree's listing, so nothing here touches
+        the disk; an unlisted folder is listed off the main thread first."""
+        sv = getattr(self, "_clip_subfolders_sv", None)
+        if sv is None:
+            return
+        from AppKit import NSTextField, NSImageView, NSImage, NSFont, NSColor, NSMakeRect, NSMakeSize
+        cur  = folder_key(self.folder) if self.folder else ""
+        kids = None
+        if cur and not self._folder_missing:
+            kids = self._folder_children.get(cur)
+            if kids is None:
+                self._folder_tree_load(cur)   # its rebuild calls back here
+        kids = kids or []
+        sig = (cur, tuple(str(k) for k in kids),
+               tuple(self._folder_counts.get(folder_key(k)) for k in kids))
+        if sig == self._clip_subfolders_sig:
+            return
+        self._clip_subfolders_sig = sig
+
+        panel = self._file_list_panel
+        pw, ph = panel.frame().size.width, panel.frame().size.height
+        ROW_H  = self._SUBFOLDER_ROW_H
+        top    = ph - 36                       # bottom of the header strip
+        shown  = min(len(kids), self._SUBFOLDER_MAX_ROWS)
+        strip  = shown * ROW_H + (6 if kids else 0)
+        if len(kids) > shown:
+            strip += ROW_H / 2                 # a half row hints that it scrolls
+        sv.setFrame_(NSMakeRect(0, top - strip, pw, strip))
+        sv.setHidden_(not kids)
+        clip_frame = NSMakeRect(0, 8, pw, max(0.0, top - strip - 8))
+        self._file_list_scroll.setFrame_(clip_frame)
+        if hasattr(self, "_empty_state_overlay"):
+            self._empty_state_overlay.setFrame_(clip_frame)
+
+        doc = sv.documentView()
+        for v in list(doc.subviews()):
+            v.removeFromSuperview()
+        y = 0.0
+        for k in kids:
+            key = folder_key(k)
+            rv = FolderRowView.alloc().initWithFrame_(NSMakeRect(6, y, pw - 12, ROW_H - 2))
+            rv._owner = self
+            rv._row   = {"kind": "folder", "path": Path(key), "label": k.name,
+                         "expandable": False}
+            rv.setToolTip_(f"Open {k.name}")
+            rv.setAutoresizingMask_(2)
+            add_hover_highlight(rv)
+
+            icon = NSImageView.alloc().initWithFrame_(NSMakeRect(8, 5, 16, 14))
+            img = NSImage.imageWithSystemSymbolName_accessibilityDescription_("folder.fill", None)
+            if img:
+                icon.setImage_(img)
+            icon.setContentTintColor_(_hex_color(COLOR_TAN))
+            rv.addSubview_(icon)
+
+            rw = pw - 12
+            chev = NSImageView.alloc().initWithFrame_(NSMakeRect(rw - 16, 7, 8, 10))
+            cimg = NSImage.imageWithSystemSymbolName_accessibilityDescription_("chevron.right", None)
+            if cimg:
+                chev.setImage_(cimg)
+            chev.setContentTintColor_(NSColor.tertiaryLabelColor())
+            chev.setAutoresizingMask_(1)
+            rv.addSubview_(chev)
+
+            right = rw - 22
+            count = self._folder_counts.get(key)
+            if count:
+                cl = NSTextField.labelWithString_(str(count) if count < 9999 else "9999+")
+                cl.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(10, 0.0))
+                cl.setTextColor_(NSColor.tertiaryLabelColor())
+                cl.sizeToFit()
+                cw = cl.frame().size.width + 2
+                cl.setFrame_(NSMakeRect(right - cw, 5, cw, 14))
+                cl.setAutoresizingMask_(1)
+                rv.addSubview_(cl)
+                right -= cw + 6
+
+            lbl = NSTextField.labelWithString_(k.name)
+            lbl.setFont_(NSFont.systemFontOfSize_(12))
+            lbl.setTextColor_(NSColor.labelColor())
+            lbl.setLineBreakMode_(4)
+            lbl.setFrame_(NSMakeRect(30, 4, max(20.0, right - 30), 16))
+            lbl.setAutoresizingMask_(2)
+            rv.addSubview_(lbl)
+
+            doc.addSubview_(rv)
+            y += ROW_H
+        doc.setFrameSize_(NSMakeSize(pw, max(y + 6, strip)))
+        doc.setAutoresizingMask_(2)
+        sv.contentView().scrollToPoint_((0, 0))
+        sv.reflectScrolledClipView_(sv.contentView())
+
     def _scan_folder(self, folder=None):
         """Return (sorted video files, {name: inode}); empty if the folder is gone.
         A file that vanishes mid-scan is skipped. Safe to call off the main thread
@@ -6010,7 +6136,7 @@ class TagWindowV2:
                 elif not self.folder:
                     msg = "No folder selected"
                 elif self._folder_children.get(folder_key(self.folder)):
-                    msg = "No clips here. Open a folder inside it"
+                    msg = "No clips here. Open a folder above"
                 else:
                     msg = "No video files found"
                 self._empty_state_msg.setStringValue_(msg)
@@ -6019,6 +6145,7 @@ class TagWindowV2:
                     # Folders panel is the way to move on
                     self._empty_state_btn.setHidden_(bool(self.folder) and not folder_missing)
         self._refresh_naming_clips()
+        self._layout_clip_subfolders()
         if hasattr(self, "_media_info"):
             self._queue_media_info()
 
@@ -6102,8 +6229,62 @@ class TagWindowV2:
 
         threading.Thread(target=work, daemon=True).start()
 
+    _POLL_SECS      = 3.0    # network folders: FSEvents never hears of changes made there
+    _TREE_POLL_SECS = 10.0   # every open folder in the tree, while the window is on screen
+
     def _start_folder_watch(self):
-        _watch_folder(self.folder, self._on_folder_changed)
+        watched = _watch_folder(self.folder, self._on_folder_changed)
+        self._folder_remote = not watched    # no FSEvents: poll until we know better
+        folder = self.folder
+        if watched and folder:
+            def work():
+                remote = not is_local_volume(folder)
+                def done():
+                    if folder_key(folder) == folder_key(self.folder):
+                        self._folder_remote = remote
+                caller = MainCaller.alloc().init()
+                caller._cb = done
+                caller.performSelectorOnMainThread_withObject_waitUntilDone_("fire:", None, False)
+            threading.Thread(target=work, daemon=True).start()
+        self._start_poll()
+
+    def _start_poll(self):
+        """One repeating check for the window's lifetime. Network shares (SMB, AFP,
+        NFS) get no FSEvents for changes made on the server or by other Macs, so
+        the clip list and folders are re-read on a timer; local folders rely on
+        FSEvents and only the tree is re-checked. All disk access is off the main
+        thread, and nothing runs while the window is hidden."""
+        if getattr(self, "_poll_caller", None) is not None:
+            return
+        import time
+        self._poll_tree_at = time.monotonic()
+        caller = MainCaller.alloc().init()
+        self._poll_caller = caller
+
+        def tick():
+            if self.app is not None and getattr(self.app, "_tag_window_v2", self) is not self:
+                self._poll_caller = None       # a newer window took over
+                return
+            try:
+                # Open and not minimized; a window behind Finder still counts,
+                # since that's exactly when Finder is changing things
+                visible = bool(self.win.isVisible()) and not self.win.isMiniaturized()
+            except Exception:
+                visible = False
+            if visible:
+                try:
+                    if getattr(self, "_folder_remote", False):
+                        self._on_folder_changed()
+                    now = time.monotonic()
+                    if now - self._poll_tree_at >= self._TREE_POLL_SECS:
+                        self._poll_tree_at = now
+                        self._refresh_folder_tree_async()
+                except Exception:
+                    pass   # a refresh problem must never stop the timer
+            caller.performSelector_withObject_afterDelay_("fire:", None, self._POLL_SECS)
+
+        caller._cb = tick
+        caller.performSelector_withObject_afterDelay_("fire:", None, self._POLL_SECS)
 
     def _on_file_selected(self, row, arm=True):
         self._selected_file_idx = row
@@ -9397,7 +9578,7 @@ class TagWindowV2:
                 if (kids and self.folder and key == folder_key(self.folder)
                         and not self._files and hasattr(self, "_empty_state_msg")):
                     self._empty_state_msg.setStringValue_(
-                        "No clips here. Open a folder inside it")
+                        "No clips here. Open a folder above")
             caller = MainCaller.alloc().init()
             caller._cb = done
             caller.performSelectorOnMainThread_withObject_waitUntilDone_("fire:", None, False)
@@ -9535,6 +9716,7 @@ class TagWindowV2:
         return rows
 
     def _rebuild_folder_tree(self):
+        self._layout_clip_subfolders()
         from AppKit import (NSTextField, NSImageView, NSImage, NSFont, NSColor,
                             NSMakeRect, NSMakeSize)
         doc = getattr(self, "_folders_doc", None)
