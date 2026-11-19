@@ -23,7 +23,7 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from datetime import datetime
 
-APP_VERSION = "1.0.14"
+APP_VERSION = "1.0.15"
 
 CRASH_LOG_DIR  = os.path.expanduser("~/.ezlogger/crashes")
 CRASH_EMAIL_TO = "zachjkeding@gmail.com"
@@ -1981,6 +1981,33 @@ def match_renames(old_inodes, new_inodes):
     return {gone[ino]: added[ino] for ino in gone if ino in added}
 
 
+CLIP_NAME_BAD_CHARS = "/:"
+
+
+def edited_clip_name(old_name, typed):
+    """Clean up a name typed over a clip's name in the clip list.
+
+    Returns (new_name, None) on success, (None, None) when nothing changed and
+    (None, reason) when the name can't be used. The clip keeps its own extension
+    if the typed name dropped or changed it."""
+    typed = (typed or "").strip()
+    old_suffix = Path(old_name).suffix
+    if Path(typed).suffix.lower() != old_suffix.lower():
+        typed = f"{typed}{old_suffix}"
+    stem = typed[:len(typed) - len(old_suffix)] if old_suffix else typed
+    if not stem.strip():
+        return None, "The name can't be empty."
+    if any(c in typed for c in CLIP_NAME_BAD_CHARS):
+        return None, "Names can't contain / or :"
+    if typed.startswith("."):
+        return None, "Names can't start with a period."
+    if len(typed.encode("utf-8")) > 255:
+        return None, "That name is too long."
+    if typed == old_name:
+        return None, None
+    return typed, None
+
+
 def move_records_for_renames(records, renames):
     """Carry tag records (base, colors) over to clips renamed outside the
     app. Never replaces a record already stored under the new name. Returns True
@@ -2677,6 +2704,18 @@ def make_objc_classes():
         def acceptsFirstResponder(self):
             return True
 
+        def mouseDown_(self, event):
+            objc.super(_KeyTableView, self).mouseDown_(event)
+            # Double-click a clip's name → rename it in place
+            if event.clickCount() == 2 and self.owner is not None \
+                    and hasattr(self.owner, "_begin_clip_rename"):
+                pt  = self.convertPoint_fromView_(event.locationInWindow(), None)
+                row = self.rowAtPoint_(pt)
+                col = self.columnAtPoint_(pt)
+                cols = self.tableColumns()
+                if row >= 0 and 0 <= col < len(cols) and cols[col].identifier() == "name":
+                    self.owner._begin_clip_rename(row)
+
         def menuForEvent_(self, event):
             """Right-click: act on the selection, or on the clicked clip when it
             isn't part of the selection (like Finder)."""
@@ -2987,6 +3026,24 @@ def make_objc_classes():
                                    frame.size.width, h)
             objc.super(_VCenterTextCell, self).drawInteriorWithFrame_inView_(frame, view)
 
+        def centeredRect_(self, frame):
+            h = self.cellSizeForBounds_(frame).height
+            if 0 < h < frame.size.height:
+                return NSMakeRect(frame.origin.x,
+                                  frame.origin.y + (frame.size.height - h) / 2.0,
+                                  frame.size.width, h)
+            return frame
+
+        # Renaming in place: the text field sits where the name is drawn
+        def editWithFrame_inView_editor_delegate_event_(self, frame, view, ed, dlg, ev):
+            objc.super(_VCenterTextCell, self).editWithFrame_inView_editor_delegate_event_(
+                self.centeredRect_(frame), view, ed, dlg, ev)
+
+        def selectWithFrame_inView_editor_delegate_start_length_(
+                self, frame, view, ed, dlg, start, length):
+            objc.super(_VCenterTextCell, self).selectWithFrame_inView_editor_delegate_start_length_(
+                self.centeredRect_(frame), view, ed, dlg, start, length)
+
     VCenterTextCell = _VCenterTextCell
 
     class _FileListDelegate(NSObject):
@@ -3009,6 +3066,31 @@ def make_objc_classes():
                 cell.setLineBreakMode_(3)  # NSLineBreakByTruncatingHead — shows end of filename where labels are
             else:
                 cell.setLineBreakMode_(4)  # truncate tail
+
+        def tableView_shouldEditTableColumn_row_(self, tv, col, row):
+            # Only a rename the app started (double-click or the menu); a single
+            # click on a row must keep selecting it, not open a text field.
+            return bool(self.owner) and getattr(self.owner, "_rename_row", None) == row
+
+        def tableView_setObjectValue_forTableColumn_row_(self, tv, value, col, row):
+            if self.owner:
+                self.owner._commit_clip_rename(row, value)
+
+        def controlTextDidEndEditing_(self, notif):
+            if self.owner:
+                self.owner._rename_row = None
+
+        def control_textView_doCommandBySelector_(self, control, text_view, sel):
+            # ESC while renaming in place: put the name back, rename nothing
+            if sel == "cancelOperation:" and self.owner:
+                control.abortEditing()
+                control.window().makeFirstResponder_(control)
+                self.owner._set_v2_hint(
+                    "↵  ENTER to log this file  ·  SPACE to preview  ·  TAB for next")
+                return True
+            return False
+        control_textView_doCommandBySelector_ = objc.selector(
+            control_textView_doCommandBySelector_, signature=b"Z@:@@:")
 
         def tableView_didClickTableColumn_(self, tv, col):
             if self.owner and col is not None:
@@ -4311,6 +4393,11 @@ class TagWindowV2:
         self._now_filename.setFont_(
             NSFont.monospacedSystemFontOfSize_weight_(12, 0))
         self._now_filename.setTextColor_(NSColor.labelColor())
+        # One line, cut in the middle: wrapping clipped the second line.
+        _fn_cell = self._now_filename.cell()
+        _fn_cell.setWraps_(False)
+        _fn_cell.setUsesSingleLineMode_(True)
+        _fn_cell.setLineBreakMode_(5)  # NSLineBreakByTruncatingMiddle
         card.addSubview_(self._now_filename)
 
         # thin separator below filename
@@ -4342,6 +4429,13 @@ class TagWindowV2:
             NSFont.monospacedSystemFontOfSize_weight_(13, 0.3))
         self._now_tag_preview.setTextColor_(_hex_color("#dbcca6"))
         self._now_tag_preview.setAlignment_(ALIGN_CENTER)
+        # One line only: a long name used to wrap into a second line that the
+        # 22 px field clipped. _set_tag_preview shrinks the font, then cuts the
+        # start so the newest labels stay visible.
+        _tp_cell = self._now_tag_preview.cell()
+        _tp_cell.setWraps_(False)
+        _tp_cell.setUsesSingleLineMode_(True)
+        _tp_cell.setLineBreakMode_(3)  # NSLineBreakByTruncatingHead
         card.addSubview_(self._now_tag_preview)
 
         # Step circles — dynamic, stored so _build_step_circles can rebuild them
@@ -4493,6 +4587,7 @@ class TagWindowV2:
         if hasattr(self, "_now_tag_preview"):
             self._now_tag_preview.setFrame_(
                 NSMakeRect(20, card_h - 68, left_w - 40, 22))
+            self._fit_tag_preview()
 
         if hasattr(self, "_now_hint"):
             self._now_hint.setFrame_(
@@ -4758,7 +4853,7 @@ class TagWindowV2:
                     if self.step:
                         title, hint = self._step_label(self.step)
                         self._set_v2_hint(f"⚡ {title}  —  {hint}")
-                        self._now_tag_preview.setStringValue_(
+                        self._set_tag_preview(
                             "_".join(self._tag_parts) or "…")
                 return
             if self._selected_file_idx < 0 or not self._files:
@@ -4793,7 +4888,7 @@ class TagWindowV2:
             self._search_idx             = 0
             self._hide_search_panel()
             self._set_v2_hint("Select a file · then press  ↵ ENTER  to log it")
-            self._now_tag_preview.setStringValue_("—")
+            self._set_tag_preview("—")
             self._set_step_state(active=-1)
             return
 
@@ -4812,7 +4907,7 @@ class TagWindowV2:
                                                     if i < popped_idx}
                     self._chain_boundary_indices = {i for i in self._chain_boundary_indices
                                                     if i < popped_idx}
-                    self._now_tag_preview.setStringValue_(
+                    self._set_tag_preview(
                         "_".join(self._tag_parts) or "…")
                     self._set_v2_hint(
                         "⌫  Removed last label  ·  press a key or ENTER to advance")
@@ -4851,7 +4946,7 @@ class TagWindowV2:
         label = sc["label"]
         self._tag_parts.append(label.replace(" ", "_"))
         self._tag_part_steps.append(bank)
-        self._now_tag_preview.setStringValue_("_".join(self._tag_parts) or "—")
+        self._set_tag_preview("_".join(self._tag_parts) or "—")
         step_lbl = self._step_labels_map.get(bank, bank.title())
         self._set_v2_hint(
             f"⚡ {step_lbl}  —  ✔ {label}  ·  press another key or ENTER to advance"
@@ -4955,6 +5050,8 @@ class TagWindowV2:
             item.setEnabled_(enabled)
             menu.addItem_(item)
 
+        add("Rename…", "rename", n == 1 and self._can_rename_now())
+        menu.addItem_(NSMenuItem.separatorItem())
         add("Quick Look", "quicklook")
         add("Show in Finder", "reveal")
         menu.addItem_(NSMenuItem.separatorItem())
@@ -4977,6 +5074,63 @@ class TagWindowV2:
                 [NSURL.fileURLWithPath_(str(f)) for f in files])
         elif key == "trash":
             self._trash_current_clip()
+        elif key == "rename" and len(files) == 1:
+            self._begin_clip_rename(self._files.index(files[0]))
+
+    # ── Rename in place ──────────────────────────────────────────────────────
+
+    def _can_rename_now(self):
+        """A clip can be renamed unless a log has labels in it. An armed log
+        with nothing picked yet is cancelled first."""
+        return self.step is None or (not self._tag_parts and not self._custom_mode)
+
+    def _begin_clip_rename(self, row):
+        """Turn a clip's name into a text field, with the name before the
+        extension selected, like Finder. Return saves, ESC cancels."""
+        if not (0 <= row < len(self._files)):
+            return
+        if not self._can_rename_now():
+            self._set_v2_hint("Finish this log or press ESC before renaming a clip")
+            return
+        if self.step is not None:
+            self.handle_key("\x1b")           # armed but empty: cancel it
+        table = self._file_list_table
+        if table.selectedRowIndexes().count() != 1 or table.selectedRow() != row:
+            self._select_file_row(row)
+        self._rename_row = row
+        table.editColumn_row_withEvent_select_(0, row, None, True)
+        # Editing has begun (or failed); clear the gate now, so ESC, which ends
+        # the edit without telling the delegate, can't leave a later click editing
+        self._rename_row = None
+        ed = table.currentEditor()
+        if ed is None:
+            return
+        stem_len = len(self._files[row].stem)
+        ed.setSelectedRange_((0, len(self._files[row].name[:stem_len].encode("utf-16-le")) // 2))
+        self._set_v2_hint("✏️  Type a new name  ·  ↵ RETURN to save  ·  ESC to cancel")
+
+    def _commit_clip_rename(self, row, value):
+        from AppKit import NSBeep
+        self._rename_row = None
+        if not (0 <= row < len(self._files)):
+            return
+        f = self._files[row]
+        new_name, err = edited_clip_name(f.name, str(value or ""))
+        if err:
+            self._set_v2_hint(f"❌  {err}")
+            NSBeep()
+        elif new_name and self.app:
+            ok, msg = self.app.rename_clip(f, new_name, f.parent)
+            self._set_v2_hint(f"✏️  Renamed to {new_name}  ·  ⌘Z to undo" if ok
+                              else f"❌  {msg}")
+            if not ok:
+                NSBeep()
+        else:
+            self._set_v2_hint("↵  ENTER to log this file  ·  SPACE to preview  ·  TAB for next")
+        # Run after the table finishes ending the edit, so the reload sticks
+        self._file_list_table.performSelector_withObject_afterDelay_(
+            "reloadData", None, 0.0)
+        self._refresh_files()
 
     def _trash_current_clip(self):
         """⌘⌫, the header trash button or the right-click menu: move every
@@ -5104,7 +5258,7 @@ class TagWindowV2:
         self._set_v2_hint(f"⚡ + Chain  —  {title}: {hint}{search_note}")
         # Keep preview showing accumulated labels so the user knows they're still there
         acc = "_".join(self._tag_parts)
-        self._now_tag_preview.setStringValue_(f"{acc}_…" if acc else "…")
+        self._set_tag_preview(f"{acc}_…" if acc else "…")
 
     def _start_player_step(self):
         """Begin a log at the sport's first step (Player unless the sport moved it)."""
@@ -5114,7 +5268,7 @@ class TagWindowV2:
             self._set_step_state(active=0)
             title, hint = self._step_label(first)
             self._set_v2_hint(f"⚡ {title}  —  {hint}")
-            self._now_tag_preview.setStringValue_("…")
+            self._set_tag_preview("…")
             return
         self.step = "players"
         self._set_step_state(active=0)
@@ -5123,12 +5277,12 @@ class TagWindowV2:
             if not self._search_enabled:
                 self._toggle_search_mode()
             self._set_v2_hint("Type player name to search  ·  ⌥ for custom insert")
-            self._now_tag_preview.setStringValue_("…")
+            self._set_tag_preview("…")
         else:
             title, hint = self._step_label("players")
             search_note = "  ·  ⌨ type to search" if self._search_enabled else ""
             self._set_v2_hint(f"⚡ {title}  —  {hint}{search_note}")
-            self._now_tag_preview.setStringValue_("…")
+            self._set_tag_preview("…")
 
     def toggle_custom_mode(self):
         if self._custom_mode:
@@ -5140,7 +5294,7 @@ class TagWindowV2:
             if self.step:
                 title, hint = self._step_label(self.step)
                 self._set_v2_hint(f"⚡ {title}  —  {hint}")
-                self._now_tag_preview.setStringValue_(
+                self._set_tag_preview(
                     "_".join(self._tag_parts) or "…")
         else:
             if self.step is None:
@@ -5151,7 +5305,7 @@ class TagWindowV2:
             self._custom_input       = ""
             self._step_before_custom = self.step
             self._set_v2_hint("⌥ Custom insert — type label, ENTER to confirm  ·  ⌥ to cancel")
-            self._now_tag_preview.setStringValue_("INSERT  —  type label▌")
+            self._set_tag_preview("INSERT  —  type label▌")
 
     def _handle_custom_input(self, key: str):
         if key == "\x7f":
@@ -5159,7 +5313,7 @@ class TagWindowV2:
         elif len(key) == 1 and key.isprintable():
             self._custom_input += key
         display = self._custom_input if self._custom_input else "…"
-        self._now_tag_preview.setStringValue_(f"INSERT  —  {display}▌")
+        self._set_tag_preview(f"INSERT  —  {display}▌")
 
     def _confirm_custom_label_v2(self, label: str):
         self._custom_indices.add(len(self._tag_parts))
@@ -5178,7 +5332,7 @@ class TagWindowV2:
             self._set_v2_hint(
                 f"⚡ {title}  —  ✔ {label}  ·  press another key or ENTER to advance"
             )
-            self._now_tag_preview.setStringValue_("_".join(self._tag_parts) or "—")
+            self._set_tag_preview("_".join(self._tag_parts) or "—")
         else:
             self._set_v2_hint(f"✔ Insert: {label}")
 
@@ -5222,7 +5376,7 @@ class TagWindowV2:
         self._exit_search_mode()
         self._tag_parts.append(label.replace(" ", "_"))
         self._tag_part_steps.append(bank)
-        self._now_tag_preview.setStringValue_("_".join(self._tag_parts) or "—")
+        self._set_tag_preview("_".join(self._tag_parts) or "—")
         step_lbl = self._step_labels_map.get(bank, bank.title())
         self._set_v2_hint(
             f"⚡ {step_lbl}  —  ✔ {label}  ·  press another key or ENTER to advance"
@@ -5245,7 +5399,7 @@ class TagWindowV2:
         if self.step:
             title, hint = self._step_label(self.step)
             self._set_v2_hint(f"⚡ {title}  —  {hint}")
-        self._now_tag_preview.setStringValue_("_".join(self._tag_parts) or "…")
+        self._set_tag_preview("_".join(self._tag_parts) or "…")
 
     def _update_search_display(self):
         bank   = self.step
@@ -5293,7 +5447,7 @@ class TagWindowV2:
                 f"⌨  {self._search_text}  —  no match  ·  ESC cancel"
             )
         preview = self._tag_parts + [f"[{self._search_text}…]"]
-        self._now_tag_preview.setStringValue_("_".join(preview))
+        self._set_tag_preview("_".join(preview))
         self._refresh_search_panel()
 
     def _handle_search_key(self, chars: str):
@@ -5344,7 +5498,7 @@ class TagWindowV2:
         title, hint        = self._step_label(self.step)
         self._custom_input = ""
         self._set_v2_hint(f"⚡ {title}  —  {hint}")
-        self._now_tag_preview.setStringValue_("_".join(self._tag_parts) or "—")
+        self._set_tag_preview("_".join(self._tag_parts) or "—")
         self._set_step_state(active=next_idx, completed=tuple(range(next_idx)))
 
     def _finalize_v2(self):
@@ -5435,7 +5589,7 @@ class TagWindowV2:
                     log_stat(self.app.session, player, play, rating, detail)
 
         color_note = "  (Finder color could not be set)" if color_failed else ""
-        self._now_tag_preview.setStringValue_(f"✓  {new_name}{color_note}")
+        self._set_tag_preview(f"✓  {new_name}{color_note}")
         self._set_v2_hint("↵  ENTER to log this file  ·  SPACE to preview  ·  TAB for next")
 
         self._reset_tag_state()
@@ -5458,6 +5612,36 @@ class TagWindowV2:
                 NSIndexSet.indexSetWithIndex_(next_row), False)
             self._file_list_table.scrollRowToVisible_(next_row)
             self._on_file_selected(next_row)
+
+    TAG_PREVIEW_FONT_MAX = 13
+    TAG_PREVIEW_FONT_MIN = 10
+
+    def _set_tag_preview(self, text: str):
+        """Set the log preview line and fit it to the card's width."""
+        self._now_tag_preview.setStringValue_(text)
+        self._now_tag_preview.setToolTip_(text)
+        self._fit_tag_preview()
+
+    def _fit_tag_preview(self):
+        """Shrink the preview font until the text fits on one line.
+
+        Below the minimum size the cell truncates the head, so the end of
+        the name, where the labels are, stays readable."""
+        from AppKit import NSFont, NSFontAttributeName, NSAttributedString
+        field = getattr(self, "_now_tag_preview", None)
+        if field is None:
+            return
+        text = field.stringValue() or ""
+        avail = field.frame().size.width - 6  # cell's own text inset
+        size = self.TAG_PREVIEW_FONT_MAX
+        while True:
+            font = NSFont.monospacedSystemFontOfSize_weight_(size, 0.3)
+            w = NSAttributedString.alloc().initWithString_attributes_(
+                text, {NSFontAttributeName: font}).size().width
+            if w <= avail or size <= self.TAG_PREVIEW_FONT_MIN:
+                break
+            size -= 0.5
+        field.setFont_(font)
 
     def _set_v2_hint(self, text: str):
         if hasattr(self, "_now_hint"):
@@ -5536,10 +5720,12 @@ class TagWindowV2:
         col.setWidth_(FILE_LIST_W - 20)
         col.setMinWidth_(90)
         col.setMaxWidth_(100000)
-        col.setEditable_(False)
+        col.setEditable_(True)    # only while _rename_row is set; see shouldEdit
         col.setResizingMask_(1 | 2)   # autoresizing + user resizing
         col.headerCell().setStringValue_("Name")
-        col.setDataCell_(VCenterTextCell.alloc().initTextCell_(""))
+        name_cell = VCenterTextCell.alloc().initTextCell_("")
+        name_cell.setEditable_(True)   # rename in place; gated by shouldEdit
+        col.setDataCell_(name_cell)
         table.addTableColumn_(col)
 
         scroll.setDocumentView_(table)
@@ -5588,6 +5774,7 @@ class TagWindowV2:
         self._col_menu_targets = []
 
         self._files            = []
+        self._rename_row       = None    # row being renamed in place, else None
         self._file_inodes      = {}      # {name: inode} from the last scan, to spot Finder renames
         self._folder_missing   = False
         self._quiet_select     = False
@@ -6077,6 +6264,9 @@ class TagWindowV2:
         window regaining focus), nothing redraws unless the clip names changed.
         `scanned` is (files, inodes, folder_missing) from a background scan, so the
         main thread does no disk access. Returns True when the lists were rebuilt."""
+        if external and hasattr(self, "_file_list_table") \
+                and self._file_list_table.editedRow() >= 0:
+            return False   # a reload would throw away the name being typed
         prev_names = [f.name for f in self._files]
         prev_idx   = self._selected_file_idx
         prev_name  = prev_names[prev_idx] if 0 <= prev_idx < len(prev_names) else None
@@ -12186,6 +12376,14 @@ class TagWindowV2:
                  "Reverses the last logged rename and restores the clip's previous Finder color. "
                  "Works from the keyboard in Log Mode or from the menubar."),
             ]),
+            ("Fixing a Clip's Name", [
+                ("para",
+                 "Picked the wrong label? Double-click a clip's name in Log Mode's "
+                 "Video Files list, or right-click it and choose Rename…, and type over it. "
+                 "The part before the extension is selected, and the extension is kept. "
+                 "RETURN saves, ESC cancels, and ⌘Z puts the old name back. The app never "
+                 "replaces another clip: a name that's already taken is refused."),
+            ]),
             ("Removing Clips", [
                 ("para",
                  "Clips you don't want can be moved to the Trash without leaving the app. "
@@ -12358,7 +12556,8 @@ class TagWindowV2:
                     ("↑ / ↓",          "Move through player search results"),
                     ("TAB",            "Advance to the next file (only when not mid-tag)"),
                     ("⌘⌫",            "Move the clip to the Trash (only when not mid-tag)"),
-                    ("⌘Z",            "Undo the last logged file rename or Move to Trash"),
+                    ("Double-click",   "Rename the clip in place (only when not mid-tag)"),
+                    ("⌘Z",            "Undo the last rename or Move to Trash"),
                 ]),
                 ("subhead", "FILE LIST"),
                 ("table", [
@@ -13151,7 +13350,11 @@ class BasketballRenamerApp(rumps.App):
                         "The file(s) for this operation are no longer present.")
             return
 
-        if op_type == "batch":
+        if op_type == "edit":
+            r     = reversible[0]
+            title = "Undo Rename"
+            msg   = f"Restore:\n  {r['new']}\n→ {r['old']}\n\nContinue?"
+        elif op_type == "batch":
             title = "Undo Batch Rename"
             msg   = f"Restore {len(reversible)} file(s) to their original names in:\n{folder}\n\nContinue?"
         else:
@@ -13195,6 +13398,37 @@ class BasketballRenamerApp(rumps.App):
             parts.append(f"{failed} file(s) could not be restored:\n" + "\n".join(errors))
         rumps.alert("Done", "\n".join(parts))
         self._refresh_tag_window_files()
+
+    # ── Rename one clip by hand ───────────────────────────────────────────────
+
+    def rename_clip(self, path, new_name, folder):
+        """Rename one clip to a name the user typed. Goes through
+        SafeRenamer.safe_rename, carries its tag record (so the next log still
+        replaces old labels) and can be undone with ⌘Z. Returns (ok, message)."""
+        path        = Path(path)
+        folder_path = Path(folder)
+        new_path    = folder_path / new_name
+        conflict = SafeRenamer.check_destination(path, new_path)
+        if conflict:
+            return False, f"{new_name} already exists in this folder."
+        ok, err = SafeRenamer.safe_rename(path, new_path, folder_path, self.session)
+        if not ok:
+            return False, err
+        records = load_tag_records(folder_path)
+        record  = records.pop(path.name, None)
+        undo_entry = {"old": path.name, "new": new_name}
+        if record:
+            records[new_name] = record
+            undo_entry["record_before"] = record
+            save_tag_records(records, folder_path)
+        _max_stack = load_json(SETTINGS_FILE, DEFAULT_SETTINGS).get("undo_stack_size", 50)
+        self._push_undo({
+            "type": "edit",
+            "folder": str(folder_path),
+            "timestamp": datetime.now().isoformat(),
+            "renames": [undo_entry],
+        }, max_stack=_max_stack)
+        return True, ""
 
     # ── Move to Trash ─────────────────────────────────────────────────────────
 

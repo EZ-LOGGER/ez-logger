@@ -785,6 +785,58 @@ def test_trash_clips_cancelled_moves_nothing(tmp_path, quiet_log):
     assert a.exists()
 
 
+# ── Renaming a clip by hand ───────────────────────────────────────────────────
+
+def test_edited_clip_name_keeps_extension_and_trims():
+    f = renamer.edited_clip_name
+    assert f("A_GOOD.mp4", "  A_GREAT.mp4 ") == ("A_GREAT.mp4", None)
+    assert f("A_GOOD.mp4", "A_GREAT") == ("A_GREAT.mp4", None)        # extension dropped
+    assert f("A_GOOD.MP4", "A_GREAT.mp4") == ("A_GREAT.mp4", None)    # case of ext is the user's
+    assert f("A_GOOD.mp4", "A_GREAT.mov") == ("A_GREAT.mov.mp4", None)
+    assert f("A_GOOD.mp4", "A_GOOD.mp4") == (None, None)               # unchanged
+
+
+def test_edited_clip_name_refuses_bad_names():
+    f = renamer.edited_clip_name
+    for typed in ("", "   ", ".mp4", "a/b", "a:b", ".hidden", "x" * 300):
+        name, err = f("A.mp4", typed)
+        assert name is None and err, typed
+
+
+def test_rename_clip_moves_record_and_undoes(tmp_path, quiet_log):
+    folder = tmp_path / "clips"; folder.mkdir()
+    a = folder / "A_GOOD.mp4"; a.write_text("x")
+    records_file = tmp_path / "records.json"
+    undo_file = tmp_path / "undo.json"
+    app = _trash_app(tmp_path)
+    with patch.multiple(renamer, TAG_RECORDS_FILE=str(records_file),
+                        UNDO_FILE=str(undo_file),
+                        SETTINGS_FILE=str(tmp_path / "settings.json")), \
+         patch.object(renamer.rumps, "alert", MagicMock(return_value=True), create=True):
+        renamer.save_tag_records({"A_GOOD.mp4": {"base": "A", "colors": []}}, folder)
+        ok, msg = app.rename_clip(a, "A_GREAT.mp4", folder)
+        assert ok, msg
+        assert not a.exists() and (folder / "A_GREAT.mp4").read_text() == "x"
+        assert renamer.load_tag_records(folder) == {"A_GREAT.mp4": {"base": "A", "colors": []}}
+        assert renamer.json.loads(undo_file.read_text())[-1]["type"] == "edit"
+
+        app.undo_last(None)
+        assert a.exists() and not (folder / "A_GREAT.mp4").exists()
+        assert renamer.load_tag_records(folder) == {"A_GOOD.mp4": {"base": "A", "colors": []}}
+
+
+def test_rename_clip_never_overwrites(tmp_path, quiet_log):
+    folder = tmp_path / "clips"; folder.mkdir()
+    a = folder / "a.mp4"; a.write_text("a")
+    b = folder / "b.mp4"; b.write_text("b")
+    app = _trash_app(tmp_path)
+    with patch.multiple(renamer, UNDO_FILE=str(tmp_path / "undo.json"),
+                        TAG_RECORDS_FILE=str(tmp_path / "records.json")):
+        ok, msg = app.rename_clip(a, "b.mp4", folder)
+    assert not ok and "already exists" in msg
+    assert a.read_text() == "a" and b.read_text() == "b"
+
+
 # ── Keeping the file lists in sync with Finder ────────────────────────────────
 
 def test_match_renames_follows_inode_to_new_name():
