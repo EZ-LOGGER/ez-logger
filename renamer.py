@@ -23,7 +23,7 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from datetime import datetime
 
-APP_VERSION = "1.0.15"
+APP_VERSION = "1.0.16"
 
 CRASH_LOG_DIR  = os.path.expanduser("~/.ezlogger/crashes")
 CRASH_EMAIL_TO = "zachjkeding@gmail.com"
@@ -170,6 +170,7 @@ DEFAULT_SETTINGS = {
     "show_rename_preview":     True,
     "conflict_behavior":       "ask",
     "preserve_ext_case":       False,
+    "jersey_in_label":         False,   # player label becomes "32 Comella"
     # Display
     "show_jersey_numbers":     True,
     "pill_density":            "auto",
@@ -585,6 +586,26 @@ def stat_segments(parts, part_steps, custom_indices, boundaries, step_order):
     return segs
 
 
+def player_tag_label(sc, include_number=False):
+    """The filename label for a picked player: the name with spaces as underscores,
+    led by the jersey number and a space ("32 Comella") when include_number is on
+    and the player has one."""
+    name = sc.get("label", "").replace(" ", "_")
+    num  = str(sc.get("number", "") or "").strip().lstrip("#")
+    if include_number and num:
+        return f"{num} {name}"
+    return name
+
+
+_JERSEY_PREFIX_RE = re.compile(r"^\d+ ")
+
+
+def strip_jersey_prefix(label):
+    """Drop the "32 " that player_tag_label may lead with, so stats count a player
+    the same with or without the jersey-number setting."""
+    return _JERSEY_PREFIX_RE.sub("", label)
+
+
 def stat_rows_for_segment(parts, part_steps, step_order, step_labels=None):
     """Turn one logged player-sequence into stats rows, using the step each label
     was picked on rather than its position. parts and part_steps are parallel lists
@@ -598,7 +619,7 @@ def stat_rows_for_segment(parts, part_steps, step_order, step_labels=None):
     by_step = {}
     for p, s in zip(parts, part_steps):
         by_step.setdefault(s, []).append(p)
-    players = by_step.get("players") or [""]
+    players = [strip_jersey_prefix(p) for p in by_step.get("players", [])] or [""]
     rating  = "_".join(by_step.get(rating_step, []))
     play    = "_".join(p for s in others if s != rating_step for p in by_step.get(s, []))
     labels  = step_labels or {}
@@ -4937,6 +4958,13 @@ class TagWindowV2:
                 elif sc is not None:
                     self._handle_shortcut_key_v2(sc)
 
+    def _tag_label_for(self, bank, sc):
+        """The filename part for a shortcut picked on step bank. Players may carry
+        their jersey number ("32 Comella") per the jersey_in_label setting."""
+        if bank == "players":
+            return player_tag_label(sc, self._settings.get("jersey_in_label", False))
+        return sc["label"].replace(" ", "_")
+
     def _handle_shortcut_key_v2(self, sc: dict):
         bank     = self.step
         children = sc.get("children", [])
@@ -4944,7 +4972,7 @@ class TagWindowV2:
             self._enter_branch(sc)
             return
         label = sc["label"]
-        self._tag_parts.append(label.replace(" ", "_"))
+        self._tag_parts.append(self._tag_label_for(bank, sc))
         self._tag_part_steps.append(bank)
         self._set_tag_preview("_".join(self._tag_parts) or "—")
         step_lbl = self._step_labels_map.get(bank, bank.title())
@@ -5374,7 +5402,7 @@ class TagWindowV2:
         bank  = self.step
         label = sc["label"]
         self._exit_search_mode()
-        self._tag_parts.append(label.replace(" ", "_"))
+        self._tag_parts.append(self._tag_label_for(bank, sc))
         self._tag_part_steps.append(bank)
         self._set_tag_preview("_".join(self._tag_parts) or "—")
         step_lbl = self._step_labels_map.get(bank, bank.title())
@@ -11800,7 +11828,7 @@ class TagWindowV2:
 
         # Calculate total content height.
         # Each make_* helper subtracts ROW_H + ROW_GAP (including the last row), so budget n gaps per group.
-        rows_per_group = [5, 3, 2, 2, 2, 4, 1, 1]  # Log, Rename, Display, Stats, Roster, System, Undo, Onboarding
+        rows_per_group = [5, 4, 2, 2, 2, 4, 1, 1]  # Log, Rename, Display, Stats, Roster, System, Undo, Onboarding
         total_h = TOP_PAD + BTM_PAD
         for n in rows_per_group:
             total_h += HDR_H + 8 + n * ROW_H + n * ROW_GAP
@@ -12011,6 +12039,9 @@ class TagWindowV2:
         make_toggle("preserve_ext_case",
                     "Preserve extension case",
                     "Keep the original extension case (.MP4 stays .MP4). Default lowercases it.")
+        make_toggle("jersey_in_label",
+                    "Jersey number in player label",
+                    "Put the player's number before the name, like \"32 Comella\".")
 
         section_gap()
 
@@ -12538,6 +12569,11 @@ class TagWindowV2:
                 ("para",
                  "When enabled, typing digits on the Player step searches by jersey number "
                  "instead of using number shortcut keys. Other steps are not affected."),
+                ("subhead", "JERSEY NUMBER IN PLAYER LABEL"),
+                ("para",
+                 "When enabled, a logged player's label starts with their jersey number, "
+                 "like \"32 Comella\" instead of \"Comella\". Players without a number keep "
+                 "just their name. Stats count the player the same either way."),
                 ("subhead", "ROSTER DOMAIN"),
                 ("para",
                  "Click '🔗 domain.com' in the Team header to set the base URL for roster "

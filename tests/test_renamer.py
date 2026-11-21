@@ -1398,3 +1398,20 @@ def test_folder_roots_lists_volumes_but_not_startup_disk(tmp_path):
     (vols / "Macintosh HD").symlink_to("/")
     roots = renamer.folder_roots(home=home, volumes_dir=str(vols))
     assert [r[0] for r in roots] == ["Movies", "NAS"]
+
+
+def test_player_tag_label_jersey_number():
+    sc = {"key": "c", "label": "Comella", "number": "32"}
+    assert renamer.player_tag_label(sc) == "Comella"
+    assert renamer.player_tag_label(sc, True) == "32 Comella"
+    assert renamer.player_tag_label({"label": "Van Dyke", "number": "#5"}, True) == "5 Van_Dyke"
+    assert renamer.player_tag_label({"label": "Smith", "number": ""}, True) == "Smith"
+    assert renamer.player_tag_label({"label": "Smith"}, True) == "Smith"
+
+
+def test_stats_ignore_jersey_prefix():
+    order = ["players", "plays", "ratings"]
+    rows = renamer.stat_rows_for_segment(["32 Comella", "LAYUP", "GOOD"],
+                                         ["players", "plays", "ratings"], order)
+    assert rows[0][0] == "Comella"
+    assert renamer.strip_jersey_prefix("Comella") == "Comella"
