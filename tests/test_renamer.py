@@ -8,7 +8,14 @@ import importlib
 from pathlib import Path
 from datetime import datetime
 from unittest.mock import patch, MagicMock
+import os
+import json
+import tempfile
 import pytest
+
+# Point HOME at a throwaway folder before renamer loads, so its ~ paths (the
+# rename log, settings, tag records…) never touch the real files.
+os.environ["HOME"] = tempfile.mkdtemp(prefix="ezlogger_test_home_")
 
 # ── Stub out heavy imports so renamer.py can load without a running NSApp ──────
 
@@ -1439,3 +1446,48 @@ def test_stats_ignore_jersey_prefix():
                                          ["players", "plays", "ratings"], order)
     assert rows[0][0] == "Comella"
     assert renamer.strip_jersey_prefix("Comella") == "Comella"
+
+
+def test_tests_use_temp_home():
+    assert not renamer.RENAME_LOG_FILE.startswith("/Users/")
+    assert renamer.RENAME_LOG_FILE.startswith(os.environ["HOME"])
+
+
+def test_parse_rename_log_mixed_formats():
+    text = ('[\n  {"old_path": "/a/1.mp4", "new_path": "/a/2.mp4"},\n'
+            '  {"old_path": "/a/3.mp4", "new_path": "/a/4.mp4"}\n]'
+            '{"old_path": "/a/5.mp4", "new_path": "/a/6.mp4"}\n'
+            'garbage line\n'
+            '{"old_path": "/a/7.mp4", "new_path": "/a/8.mp4"}\n')
+    got = [e["old_path"] for e in renamer.parse_rename_log(text)]
+    assert got == ["/a/1.mp4", "/a/3.mp4", "/a/5.mp4", "/a/7.mp4"]
+
+
+def test_repair_rename_log_drops_test_entries_keeps_real():
+    d = tempfile.mkdtemp()
+    log = os.path.join(d, "rename_log.json")
+    real = {"old_path": "/Volumes/Zach SSD/FB/ZK_1.MP4", "new_path": "/Volumes/Zach SSD/FB/FB_1.mp4"}
+    tmp1 = {"old_path": "/var/folders/qd/abc/T/tmpx/clip.mp4", "new_path": "/var/folders/qd/abc/T/tmpx/r.mp4"}
+    tmp2 = {"old_path": "/private/tmp/x/clip.mp4", "new_path": "/private/tmp/x/r.mp4"}
+    with open(log, "w") as f:
+        f.write(json.dumps([tmp1, real], indent=2) + json.dumps(tmp2) + "\n")
+    assert renamer.repair_rename_log(log) is True
+    lines = open(log).read().splitlines()
+    assert [json.loads(l) for l in lines] == [real]
+    assert os.path.exists(log + ".bak")
+    # already clean: left alone
+    assert renamer.repair_rename_log(log) is False
+    assert renamer.repair_rename_log(os.path.join(d, "missing.json")) is False
+
+
+def test_is_test_log_entry_needs_both_paths_in_temp():
+    assert not renamer.is_test_log_entry(
+        {"old_path": "/var/folders/qd/abc/T/x.mp4", "new_path": "/Volumes/SSD/x.mp4"})
+
+
+def test_join_tag_parts_drops_trailing_periods():
+    assert renamer.join_tag_parts(["SMITH JR.", "TACKLE"]) == "SMITH JR._TACKLE"
+    assert renamer.join_tag_parts(["TACKLE", "SMITH JR."]) == "TACKLE_SMITH JR"
+    assert renamer.join_tag_parts(["J.GREEN"]) == "J.GREEN"
+    assert renamer.join_tag_parts(["GOOD "]) == "GOOD"
+    assert renamer.join_tag_parts([]) == ""

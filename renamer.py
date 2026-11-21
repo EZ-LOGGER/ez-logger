@@ -23,7 +23,7 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from datetime import datetime
 
-APP_VERSION = "1.0.17"
+APP_VERSION = "1.0.18"
 
 CRASH_LOG_DIR  = os.path.expanduser("~/.ezlogger/crashes")
 CRASH_EMAIL_TO = "zachjkeding@gmail.com"
@@ -586,6 +586,13 @@ def stat_segments(parts, part_steps, custom_indices, boundaries, step_order):
     return segs
 
 
+def join_tag_parts(parts):
+    """Join logged labels into the tag part of a filename. Trailing periods and
+    spaces are dropped, so a last label like "SMITH JR." doesn't leave
+    "SMITH JR..mp4" behind."""
+    return "_".join(parts).rstrip(". ")
+
+
 def player_tag_label(sc, include_number=False):
     """The filename label for a picked player: the name with spaces as underscores,
     led by the jersey number and a space ("32 Comella") when include_number is on
@@ -685,6 +692,66 @@ def _remove_legacy_launch_agent():
             os.remove(LEGACY_LAUNCH_AGENT)
     except Exception:
         pass
+
+_TEMP_PATH_RE = re.compile(r"^(/private)?(/var/folders/[^/]+/[^/]+/T/|/tmp/)")
+
+
+def parse_rename_log(text):
+    """Read the rename log. Old versions wrote one JSON array; newer ones append a
+    JSON object per line, and some logs hold both (the array, then lines).
+    Returns every entry in order; a damaged stretch is skipped up to its line end."""
+    dec, out, i, n = json.JSONDecoder(), [], 0, len(text)
+    while i < n:
+        while i < n and text[i] in " \t\r\n":
+            i += 1
+        if i >= n:
+            break
+        try:
+            obj, i = dec.raw_decode(text, i)
+        except ValueError:
+            nl = text.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        if isinstance(obj, list):
+            out.extend(e for e in obj if isinstance(e, dict))
+        elif isinstance(obj, dict):
+            out.append(obj)
+    return out
+
+
+def is_test_log_entry(entry):
+    """True for a log entry the old test suite wrote: both paths in the system
+    temp folder, where no real clip folder lives."""
+    return all(_TEMP_PATH_RE.match(str(entry.get(k, ""))) for k in ("old_path", "new_path"))
+
+
+def repair_rename_log(path=None):
+    """Rewrite a rename log that still starts with the old JSON array, or holds
+    entries the test suite wrote, as plain JSON lines without the test entries.
+    Keeps a one-time backup beside it (.bak) and writes atomically. Real entries
+    are never dropped. Returns True if it rewrote the file; never raises."""
+    path = path or RENAME_LOG_FILE
+    try:
+        if not os.path.isfile(path):
+            return False
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        entries = parse_rename_log(text)
+        kept    = [e for e in entries if not is_test_log_entry(e)]
+        if not text.lstrip().startswith("[") and len(kept) == len(entries):
+            return False
+        bak = path + ".bak"
+        if not os.path.exists(bak):
+            with open(bak, "w", encoding="utf-8") as f:
+                f.write(text)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(json.dumps(e, default=str) + "\n" for e in kept)
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        return False
+
 
 def file_timestamps(path: Path):
     try:
@@ -5549,7 +5616,7 @@ class TagWindowV2:
         f = self._files[self._selected_file_idx]
         close_quicklook()
 
-        tag_str  = "_".join(self._tag_parts)
+        tag_str  = join_tag_parts(self._tag_parts)
         records  = load_tag_records(f.parent)
         record   = records.get(f.name)
         base     = tag_base_stem(f.stem, record)
@@ -12796,6 +12863,7 @@ class BasketballRenamerApp(rumps.App):
         self._session_start_ts = datetime.now().isoformat()
         self._build_menu()
         _remove_legacy_launch_agent()
+        threading.Thread(target=repair_rename_log, daemon=True).start()
         # Apply dock visibility preference at startup
         _s = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
         if not _s.get("show_in_dock", True):

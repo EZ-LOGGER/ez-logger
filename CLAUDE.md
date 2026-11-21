@@ -48,6 +48,7 @@ gh release create vX.X.X "dist/EZLogger-X.X.X.dmg" --title "EZ Logger vX.X.X" --
 ## Testing and verifying
 
 - **Running from source uses real data.** It reads the real settings in `~` and renames real files. Set `HOME` to a temp folder to isolate a run, or point the app at a folder of copied clips.
+- **Tests run with `HOME` set to a temp folder** (top of `tests/test_renamer.py`, before `renamer` loads), so they never write the real rename log or settings. Keep it that way.
 - **Unit tests don't exercise the UI.** `tests/test_renamer.py` stubs `rumps`, `AppKit`, `Foundation`, `objc`, `Quartz` and others, so passing tests say nothing about clicks, focus or layout. They cover the pure logic: parsing, naming, stats, safe renames, batch selection, relabeling and Finder color merging.
 - **For UI changes, drive the real window from a script** with `make_objc_classes()`, `BasketballRenamerApp()` and `open_tag_mode_v2`. Call `handle_key` for keys, and send real `NSEvent`s through `win.sendEvent_` for clicks. Calling a handler directly hides hit-testing bugs. Known traps:
   - A background test window isn't key, so it swallows the first click unless the view accepts first mouse.
@@ -69,7 +70,7 @@ These must never be violated:
 5. **Use `_save_setting(key, value)` for single settings.** `save_json(SETTINGS_FILE, partial_dict)` wipes every other setting.
 6. **Never delete clips permanently.** `safe_trash` uses `NSFileManager.trashItemAtURL` through `_trash_file`. A volume with no Trash fails, and nothing falls back to `os.remove` or `unlink`. Nothing in the app empties the Trash.
 
-`SafeRenamer.validate_file` also enforces the folder boundary after resolving symlinks, regular files only, top-level files only and video extensions only. `_log()` records every attempt and must never raise.
+`SafeRenamer.validate_file` also enforces the folder boundary after resolving symlinks, regular files only, top-level files only, video extensions only and **no hidden files**: on exFAT and network drives macOS keeps a 4 KB `._NAME.MP4` AppleDouble file beside each clip, with a video extension. `safe_rename` also refuses a hidden destination. `_log()` records every attempt and must never raise.
 
 ## Persistent state
 
@@ -85,7 +86,7 @@ All paths are in `~`; constants are at the top of `renamer.py`.
 | `.bball_renamer_v3_rosters.json` | Roster cache per sport |
 | `.bball_renamer_v3_rosters_meta.json` | Roster cache timestamps, checked against `roster_cache_days` |
 | `.bball_renamer_v3_key_presets.json` | Named hotkey layouts per sport |
-| `.ezlogger/rename_log.json` | Permanent log of every rename attempt |
+| `.ezlogger/rename_log.json` | Permanent log of every rename attempt, one JSON object per line. Old versions wrote a JSON array; `repair_rename_log` rewrites that at launch (backup in `.bak`) and drops old test entries. Read it with `parse_rename_log` |
 | `.ezlogger/tag_records.json` | Per folder: `{"version": 2, "folders": {folder: {tagged_filename: {"base", "colors"}}}, "legacy": {...}}`, so relabeling replaces old labels. Old files may still hold a `reject` key from the removed reject feature; it's ignored |
 | `.ezlogger/crashes/` | Crash logs |
 | `Library/LaunchAgents/com.bball.renamer.plist` | Legacy login item from the removed "Launch at login" setting; `_remove_legacy_launch_agent` deletes it at launch |
