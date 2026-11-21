@@ -23,7 +23,7 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from datetime import datetime
 
-APP_VERSION = "1.0.16"
+APP_VERSION = "1.0.17"
 
 CRASH_LOG_DIR  = os.path.expanduser("~/.ezlogger/crashes")
 CRASH_EMAIL_TO = "zachjkeding@gmail.com"
@@ -1235,6 +1235,13 @@ class SafeRenamer:
         real_file   = os.path.realpath(str(file_path))
         real_folder = os.path.realpath(str(folder_root))
 
+        # Never a hidden file. On exFAT and network drives macOS keeps a 4 KB
+        # "._NAME.MP4" AppleDouble file beside each clip; it has a video
+        # extension but is metadata, and renaming it leaves junk clips behind.
+        if (Path(file_path).name.startswith(".")
+                or os.path.basename(real_file).startswith(".")):
+            return False, "is a hidden file (macOS metadata, not a clip)"
+
         # Must be directly inside the folder (no subdirectory traversal)
         if not real_file.startswith(real_folder + os.sep):
             return False, "outside session folder boundary"
@@ -1274,6 +1281,12 @@ class SafeRenamer:
         real_folder = os.path.realpath(str(folder_root))
         if not real_dst.startswith(real_folder + os.sep):
             msg = "destination is outside session folder boundary"
+            SafeRenamer._log(src, dst, session, success=False, error=msg)
+            return False, msg
+
+        # A clip must never be renamed into a hidden file
+        if Path(dst).name.startswith("."):
+            msg = "destination is a hidden file name"
             SafeRenamer._log(src, dst, session, success=False, error=msg)
             return False, msg
 

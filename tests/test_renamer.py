@@ -278,6 +278,30 @@ def test_safe_directory_skipped_even_with_video_name():
     assert "directory" in reason
 
 
+def test_safe_appledouble_file_rejected():
+    """macOS "._" companion files on exFAT drives carry the clip's extension
+    but are 4 KB of metadata; they must never be validated as clips."""
+    d = tempfile.mkdtemp()
+    ad = Path(d) / "._ZK_8791.MP4"
+    ad.write_bytes(b"\x00\x05\x16\x07" + b"\x00" * 4092)
+    ok, reason = SafeRenamer.validate_file(ad, Path(d))
+    assert not ok
+    assert "hidden" in reason
+    ok, _ = SafeRenamer.safe_rename(ad, Path(d) / "FB_SYR_ZK_1H_.mp4", Path(d))
+    assert not ok
+    assert ad.exists()
+
+
+def test_safe_rename_refuses_hidden_destination():
+    d = tempfile.mkdtemp()
+    f = Path(d) / "clip.mp4"
+    f.touch()
+    ok, reason = SafeRenamer.safe_rename(f, Path(d) / ".clip.mp4", Path(d))
+    assert not ok
+    assert "hidden" in reason
+    assert f.exists()
+
+
 def test_safe_empty_folder_rejected():
     ok, err = SafeRenamer.validate_folder("")
     assert not ok
